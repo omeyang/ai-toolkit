@@ -4,15 +4,15 @@ AI 构建块统一仓库：技能包、MCP 服务器、代理、钩子、工作�
 
 ## 范围
 
-- `skills/`：可复用技能包（SKILL.md、脚本、资源）
-- `mcp/`：MCP 服务器模块、配置、适配器和示例
-- `agents/`：代理定义和可复用的角色/剧本规范
-- `hooks/`：事件钩子（前置/后置动作、验证、护栏）
-- `workflows/`：多步骤编排流程和自动化管道
+- `skills/`：可复用技能包（18 个 Go 全栈技能）
+- `mcp/`：MCP 服务器配置模板（K8s/MongoDB/ClickHouse/Redis/Kafka/OTel/GitHub）
+- `agents/`：代理定义（Go 开发/代码审查/K8s 运维/数据库/安全审计）
+- `hooks/`：事件钩子脚本（格式化/lint/测试/安全拦截/上下文注入）
+- `workflows/`：编排流程（TDD/Code Review/Deploy）
+- `prompts/`：CLAUDE.md 模板和提示词片段
 - `policies/`：安全、权限、合规和治理规则
-- `prompts/`：可复用提示词模板和组件
 - `evaluations/`：测试集、基准测试、回归检查和评分
-- `integrations/`：外部系统连接器（GitHub、Slack 等）
+- `integrations/`：外部系统连接器
 - `examples/`：端到端参考项目
 - `docs/`：架构说明、规范和路线图
 
@@ -20,29 +20,58 @@ AI 构建块统一仓库：技能包、MCP 服务器、代理、钩子、工作�
 
 ```text
 ai-toolkit/
-├── agents/
-├── docs/
-├── evaluations/
-├── examples/
-├── hooks/
-├── integrations/
-├── mcp/
+├── skills/          # 18 个技能包 (Go 全栈)
+├── hooks/           # 6 个 Hook 脚本 + 2 个配置模板
+│   ├── scripts/     # go-format, go-lint, go-test-async, block-dangerous, session-context, commit-lint
+│   └── configs/     # settings.json (完整/最小)
+├── mcp/             # MCP 配置模板
+│   ├── configs/     # go-backend-full, go-backend-minimal, observability
+│   └── servers/     # MCP 服务器参考清单
+├── agents/          # 5 个 Agent 定义
+│   ├── golang-pro/
+│   ├── code-reviewer/
+│   ├── k8s-devops/
+│   ├── db-specialist/
+│   └── security-auditor/
+├── workflows/       # 3 个工作流
+│   ├── tdd/
+│   ├── code-review/
+│   └── deploy/
+├── prompts/         # 提示词模板
+│   ├── system/      # CLAUDE.md 模板
+│   ├── task/        # 任务提示词 (审查/排查/实现)
+│   └── snippets/    # 代码片段 (错误处理/并发)
 ├── policies/
-├── prompts/
-├── skills/
-└── workflows/
+├── evaluations/
+├── integrations/
+├── examples/
+└── docs/
 ```
 
 ## 快速开始
 
-1. 将模块添加或迁移到相应的顶级目录
-2. 在该目录（或模块）中添加 `README.md`，说明用法和约束
-3. 在 `examples/` 或 `evaluations/` 下添加至少一个可运行或可测试的示例
+### 为 Go 项目配置 Claude Code
 
-## 迁移快照
+```bash
+# 1. 复制 Hook 脚本
+mkdir -p .claude/hooks
+cp ai-toolkit/hooks/scripts/*.sh .claude/hooks/
+chmod +x .claude/hooks/*.sh
 
-- 初始 Claude 技能包迁移已完成，位于 `skills/`
-- 当前清单跟踪在 `skills/CATALOG.md`
+# 2. 配置 Hook
+cp ai-toolkit/hooks/configs/settings.json .claude/settings.json
+
+# 3. 配置 MCP 服务器
+cp ai-toolkit/mcp/configs/go-backend-full.json .mcp.json
+
+# 4. 生成 CLAUDE.md
+cp ai-toolkit/prompts/system/CLAUDE.md.tmpl CLAUDE.md
+# 编辑 CLAUDE.md，替换 {{PLACEHOLDER}} 为实际值
+```
+
+### 单独使用某个模块
+
+每个模块都可独立使用，详见各模块的 README.md。
 
 ## 原则
 

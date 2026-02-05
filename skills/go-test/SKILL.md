@@ -1,6 +1,6 @@
 ---
 name: go-test
-description: Go 测试专家 - 表驱动测试、httptest、基准测试、模糊测试、mock、testcontainers。使用场景：编写测试、修复失败测试、提高覆盖率、性能调优。
+description: "Go 测试专家 - 表驱动测试、httptest HTTP测试、基准测试(benchmem)、模糊测试(fuzz)、mock生成(gomock)、testcontainers集成测试、golden files、goroutine泄漏检测(goleak)、testify断言。适用：编写单元/集成测试、修复失败测试、提高覆盖率、性能基准测试、TDD开发。不适用：非Go语言测试、E2E端到端测试(应使用专用框架)、纯手动QA测试流程。触发词：go test, 测试, test, 表驱动, table driven, benchmark, 基准测试, fuzz, mock, testcontainers, 覆盖率, coverage, httptest, goleak"
 user-invocable: true
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---

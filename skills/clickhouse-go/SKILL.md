@@ -1,6 +1,6 @@
 ---
 name: clickhouse-go
-description: Go ClickHouse 专家 - OLAP 分析、表引擎选择、查询优化、批量插入、分页查询。使用场景：数据分析、实时报表、日志存储。
+description: "Go ClickHouse OLAP 分析专家 - 表引擎选择、查询优化、批量插入、分页查询、聚合分析、数据管理。适用：大规模数据分析（OLAP）、日志分析、用户行为分析、实时报表、时序数据存储、列式存储高压缩场景。不适用：频繁单行更新/删除的 OLTP 场景（用 PostgreSQL/MySQL）、需要事务和强一致性的业务系统、数据量小于百万行的简单查询。触发词：clickhouse, OLAP, 列式存储, MergeTree, 聚合, 批量插入, 分区, TTL, 物化视图, 宽表"
 user-invocable: true
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
@@ -16,170 +16,37 @@ allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ### 创建连接
 
 ```go
-import (
-    "context"
-    "time"
-
-    "github.com/ClickHouse/clickhouse-go/v2"
-    "github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-)
-
-func NewClickHouse(ctx context.Context, dsn string) (driver.Conn, error) {
-    opts, err := clickhouse.ParseDSN(dsn)
-    if err != nil {
-        return nil, fmt.Errorf("parse dsn: %w", err)
-    }
-
-    // 配置连接池
-    opts.MaxOpenConns = 10
-    opts.MaxIdleConns = 5
-    opts.ConnMaxLifetime = 10 * time.Minute
-    opts.DialTimeout = 5 * time.Second
-    opts.ReadTimeout = 30 * time.Second
-
-    conn, err := clickhouse.Open(opts)
-    if err != nil {
-        return nil, fmt.Errorf("open clickhouse: %w", err)
-    }
-
-    // 验证连接
-    if err := conn.Ping(ctx); err != nil {
-        return nil, fmt.Errorf("ping clickhouse: %w", err)
-    }
-
-    return conn, nil
-}
+func NewClickHouse(ctx context.Context, dsn string) (driver.Conn, error)
 ```
+
+- 解析 DSN，配置连接池（MaxOpenConns=10, MaxIdleConns=5）
+- 设置超时（DialTimeout=5s, ReadTimeout=30s）
+- 验证 Ping
 
 ### 包装器模式
 
 ```go
-type ClickHouse struct {
-    conn driver.Conn
-}
-
-func New(conn driver.Conn) *ClickHouse {
-    return &ClickHouse{conn: conn}
-}
-
-// Conn 暴露底层连接
-func (c *ClickHouse) Conn() driver.Conn {
-    return c.conn
-}
-
-// Health 健康检查
-func (c *ClickHouse) Health(ctx context.Context) error {
-    return c.conn.Ping(ctx)
-}
-
-// Close 关闭连接
-func (c *ClickHouse) Close() error {
-    return c.conn.Close()
-}
+type ClickHouse struct { conn driver.Conn }
+func New(conn driver.Conn) *ClickHouse
+func (c *ClickHouse) Conn() driver.Conn
+func (c *ClickHouse) Health(ctx context.Context) error
+func (c *ClickHouse) Close() error
 ```
+
+> 完整实现见 [references/examples.md](references/examples.md#1-连接管理)
 
 ---
 
 ## 2. 表引擎选择
 
-### MergeTree（最常用）
+| 引擎 | 适用场景 | 特点 |
+|------|---------|------|
+| MergeTree | 通用 OLAP、时序、日志 | 最常用，支持分区/TTL/索引 |
+| ReplacingMergeTree | 有重复数据 | 按版本号去重，查询用 FINAL |
+| AggregatingMergeTree | 实时统计、仪表盘 | 配合物化视图预聚合 |
+| SummingMergeTree | 计数器、累加统计 | 自动求和指定列 |
 
-适用于：通用 OLAP、时序数据、日志分析
-
-```sql
-CREATE TABLE events (
-    event_date Date,
-    event_time DateTime,
-    user_id UInt64,
-    event_type String,
-    properties String,
-
-    INDEX idx_user_id user_id TYPE minmax GRANULARITY 4
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(event_date)
-ORDER BY (event_date, user_id, event_time)
-TTL event_date + INTERVAL 90 DAY
-SETTINGS index_granularity = 8192;
-```
-
-### ReplacingMergeTree（去重）
-
-适用于：可能有重复数据的场景
-
-```sql
-CREATE TABLE user_profiles (
-    user_id UInt64,
-    name String,
-    email String,
-    updated_at DateTime
-) ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY user_id;
-
--- 查询时强制合并去重
-SELECT * FROM user_profiles FINAL WHERE user_id = 123;
-```
-
-### AggregatingMergeTree（预聚合）
-
-适用于：实时统计、仪表盘
-
-```sql
--- 原始表
-CREATE TABLE events_raw (
-    event_date Date,
-    user_id UInt64,
-    event_type String,
-    value UInt64
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(event_date)
-ORDER BY (event_date, user_id);
-
--- 聚合表
-CREATE TABLE events_daily (
-    event_date Date,
-    event_type String,
-    total_value AggregateFunction(sum, UInt64),
-    event_count AggregateFunction(count, UInt64),
-    unique_users AggregateFunction(uniq, UInt64)
-) ENGINE = AggregatingMergeTree()
-PARTITION BY toYYYYMM(event_date)
-ORDER BY (event_date, event_type);
-
--- 物化视图自动聚合
-CREATE MATERIALIZED VIEW events_daily_mv TO events_daily AS
-SELECT
-    event_date,
-    event_type,
-    sumState(value) AS total_value,
-    countState() AS event_count,
-    uniqState(user_id) AS unique_users
-FROM events_raw
-GROUP BY event_date, event_type;
-
--- 查询聚合结果
-SELECT
-    event_date,
-    event_type,
-    sumMerge(total_value) AS total,
-    countMerge(event_count) AS count,
-    uniqMerge(unique_users) AS users
-FROM events_daily
-GROUP BY event_date, event_type;
-```
-
-### SummingMergeTree（自动求和）
-
-适用于：计数器、累加统计
-
-```sql
-CREATE TABLE page_views (
-    date Date,
-    page String,
-    views UInt64,
-    unique_visitors UInt64
-) ENGINE = SummingMergeTree((views, unique_visitors))
-ORDER BY (date, page);
-```
+> 完整 DDL 示例见 [references/examples.md](references/examples.md#2-表引擎选择)
 
 ---
 
@@ -188,38 +55,7 @@ ORDER BY (date, page);
 ### 基本查询
 
 ```go
-func (c *ClickHouse) Query(ctx context.Context, query string, args ...any) ([]map[string]any, error) {
-    rows, err := c.conn.Query(ctx, query, args...)
-    if err != nil {
-        return nil, fmt.Errorf("query: %w", err)
-    }
-    defer rows.Close()
-
-    columns := rows.Columns()
-    columnTypes := rows.ColumnTypes()
-
-    var results []map[string]any
-
-    for rows.Next() {
-        values := make([]any, len(columns))
-        valuePtrs := make([]any, len(columns))
-        for i := range values {
-            valuePtrs[i] = &values[i]
-        }
-
-        if err := rows.Scan(valuePtrs...); err != nil {
-            return nil, fmt.Errorf("scan: %w", err)
-        }
-
-        row := make(map[string]any)
-        for i, col := range columns {
-            row[col] = values[i]
-        }
-        results = append(results, row)
-    }
-
-    return results, rows.Err()
-}
+func (c *ClickHouse) Query(ctx context.Context, query string, args ...any) ([]map[string]any, error)
 ```
 
 ### 结构体查询
@@ -234,15 +70,10 @@ type Event struct {
 
 func (c *ClickHouse) QueryEvents(ctx context.Context, userID uint64, limit int) ([]Event, error) {
     var events []Event
-
     err := c.conn.Select(ctx, &events, `
         SELECT event_date, event_time, user_id, event_type
-        FROM events
-        WHERE user_id = ?
-        ORDER BY event_time DESC
-        LIMIT ?
+        FROM events WHERE user_id = ? ORDER BY event_time DESC LIMIT ?
     `, userID, limit)
-
     return events, err
 }
 ```
@@ -250,49 +81,16 @@ func (c *ClickHouse) QueryEvents(ctx context.Context, userID uint64, limit int) 
 ### 分页查询
 
 ```go
-type PageOptions struct {
-    Page     int64
-    PageSize int64
-    OrderBy  string
-}
+type PageOptions struct { Page, PageSize int64; OrderBy string }
+type PageResult[T any] struct { Data []T; Total, Page, PageSize, TotalPages int64 }
 
-type PageResult[T any] struct {
-    Data       []T
-    Total      int64
-    Page       int64
-    PageSize   int64
-    TotalPages int64
-}
-
-func (c *ClickHouse) QueryPage[T any](ctx context.Context, baseQuery string, opts PageOptions, args ...any) (*PageResult[T], error) {
-    // 计算 total
-    countQuery := fmt.Sprintf("SELECT count() FROM (%s)", baseQuery)
-    var total uint64
-    if err := c.conn.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
-        return nil, fmt.Errorf("count: %w", err)
-    }
-
-    // 分页查询
-    offset := (opts.Page - 1) * opts.PageSize
-    pageQuery := fmt.Sprintf("%s ORDER BY %s LIMIT %d OFFSET %d",
-        baseQuery, opts.OrderBy, opts.PageSize, offset)
-
-    var data []T
-    if err := c.conn.Select(ctx, &data, pageQuery, args...); err != nil {
-        return nil, fmt.Errorf("select: %w", err)
-    }
-
-    totalPages := (int64(total) + opts.PageSize - 1) / opts.PageSize
-
-    return &PageResult[T]{
-        Data:       data,
-        Total:      int64(total),
-        Page:       opts.Page,
-        PageSize:   opts.PageSize,
-        TotalPages: totalPages,
-    }, nil
-}
+func (c *ClickHouse) QueryPage[T any](ctx context.Context, baseQuery string, opts PageOptions, args ...any) (*PageResult[T], error)
 ```
+
+- 使用 `validateOrderBy()` 白名单防止 SQL 注入
+- 先 count 后分页
+
+> 完整实现见 [references/examples.md](references/examples.md#3-查询操作)
 
 ---
 
@@ -303,51 +101,20 @@ func (c *ClickHouse) QueryPage[T any](ctx context.Context, baseQuery string, opt
 ```go
 func (c *ClickHouse) BatchInsert(ctx context.Context, table string, data []Event) error {
     batch, err := c.conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s", table))
-    if err != nil {
-        return fmt.Errorf("prepare batch: %w", err)
-    }
-
-    for _, event := range data {
-        if err := batch.Append(
-            event.Date,
-            event.Time,
-            event.UserID,
-            event.EventType,
-        ); err != nil {
-            return fmt.Errorf("append: %w", err)
-        }
-    }
-
-    return batch.Send()
+    // ... batch.Append() + batch.Send()
 }
 ```
 
 ### 分批插入（大数据量）
 
 ```go
-func (c *ClickHouse) BatchInsertChunked(ctx context.Context, table string, data []Event, chunkSize int) error {
-    for i := 0; i < len(data); i += chunkSize {
-        end := i + chunkSize
-        if end > len(data) {
-            end = len(data)
-        }
-
-        chunk := data[i:end]
-        if err := c.BatchInsert(ctx, table, chunk); err != nil {
-            return fmt.Errorf("batch chunk %d: %w", i/chunkSize, err)
-        }
-
-        // 检查 context 取消
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        default:
-        }
-    }
-
-    return nil
-}
+func (c *ClickHouse) BatchInsertChunked(ctx context.Context, table string, data []Event, chunkSize int) error
 ```
+
+- 按 chunkSize 分批调用 BatchInsert
+- 每批检查 ctx 取消
+
+> 完整实现见 [references/examples.md](references/examples.md#4-批量插入)
 
 ---
 
@@ -355,115 +122,40 @@ func (c *ClickHouse) BatchInsertChunked(ctx context.Context, table string, data 
 
 ### 常用聚合函数
 
-```sql
--- 基础聚合
-SELECT
-    toStartOfDay(event_time) AS day,
-    event_type,
-    count() AS total,
-    uniq(user_id) AS unique_users,
-    sum(value) AS total_value,
-    avg(value) AS avg_value,
-    min(value) AS min_value,
-    max(value) AS max_value
-FROM events
-WHERE event_date >= today() - 7
-GROUP BY day, event_type
-ORDER BY day DESC;
-
--- 分位数
-SELECT
-    quantile(0.50)(response_time) AS median,
-    quantile(0.95)(response_time) AS p95,
-    quantile(0.99)(response_time) AS p99,
-    quantilesExact(0.50, 0.95, 0.99)(response_time) AS percentiles
-FROM requests
-WHERE timestamp >= now() - INTERVAL 1 HOUR;
-
--- TopK
-SELECT
-    topK(10)(user_id) AS top_users,
-    topKWeighted(10)(page, views) AS top_pages
-FROM page_views;
-```
+- 基础：`count()`, `uniq()`, `sum()`, `avg()`, `min()`, `max()`
+- 分位数：`quantile(0.95)(col)`, `quantilesExact(0.50, 0.95, 0.99)(col)`
+- TopK：`topK(10)(col)`, `topKWeighted(10)(col, weight)`
 
 ### 窗口函数
 
-```sql
--- 累计求和
-SELECT
-    event_date,
-    value,
-    sum(value) OVER (ORDER BY event_date) AS cumulative
-FROM daily_stats;
+- 累计求和：`sum(value) OVER (ORDER BY date)`
+- 排名：`rank() OVER (ORDER BY score DESC)`
+- 移动平均：`avg(value) OVER (ORDER BY date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)`
 
--- 排名
-SELECT
-    user_id,
-    score,
-    rank() OVER (ORDER BY score DESC) AS rank,
-    dense_rank() OVER (ORDER BY score DESC) AS dense_rank
-FROM leaderboard;
-
--- 移动平均
-SELECT
-    date,
-    value,
-    avg(value) OVER (ORDER BY date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS ma7
-FROM daily_stats;
-```
+> 完整 SQL 示例见 [references/examples.md](references/examples.md#5-聚合查询)
 
 ---
 
 ## 6. 查询优化
 
-### 使用索引
+### 索引策略
 
 ```sql
--- 创建跳数索引
+-- 跳数索引
 ALTER TABLE events ADD INDEX idx_event_type event_type TYPE set(100) GRANULARITY 4;
-
--- 布隆过滤器索引（适合高基数列）
+-- 布隆过滤器（高基数列）
 ALTER TABLE events ADD INDEX idx_user_id user_id TYPE bloom_filter() GRANULARITY 4;
-
--- 使用 PREWHERE（在主键过滤后进一步过滤）
-SELECT * FROM events
-PREWHERE event_type = 'click'
-WHERE event_date >= '2024-01-01'
-  AND user_id = 123;
-```
-
-### 查询计划分析
-
-```sql
--- 查看执行计划
-EXPLAIN SELECT * FROM events WHERE user_id = 123;
-
--- 查看详细执行统计
-EXPLAIN PIPELINE SELECT * FROM events WHERE user_id = 123;
-
--- 开启 profile
-SET send_logs_level = 'trace';
-SELECT * FROM events WHERE user_id = 123;
 ```
 
 ### 优化技巧
 
-```sql
--- ✅ 使用 IN 替代多个 OR
-SELECT * FROM events WHERE user_id IN (1, 2, 3, 4, 5);
+- 使用 `PREWHERE` 在主键过滤后进一步过滤
+- 使用 `IN` 替代多个 `OR`
+- 使用 `LIMIT BY` 分组限制
+- 避免 `SELECT *`
+- 使用物化列减少计算
 
--- ✅ 使用 LIMIT BY 进行分组限制
-SELECT * FROM events
-ORDER BY event_time DESC
-LIMIT 10 BY user_id;
-
--- ✅ 避免 SELECT *
-SELECT event_date, event_type, count() FROM events GROUP BY 1, 2;
-
--- ✅ 使用物化列
-ALTER TABLE events ADD COLUMN event_hour UInt8 MATERIALIZED toHour(event_time);
-```
+> 完整示例见 [references/examples.md](references/examples.md#6-查询优化)
 
 ---
 
@@ -474,11 +166,9 @@ ALTER TABLE events ADD COLUMN event_hour UInt8 MATERIALIZED toHour(event_time);
 ```sql
 -- 行级 TTL
 ALTER TABLE events MODIFY TTL event_date + INTERVAL 90 DAY;
-
--- 列级 TTL（归档旧数据的详细字段）
+-- 列级 TTL
 ALTER TABLE events MODIFY COLUMN properties String TTL event_date + INTERVAL 30 DAY;
-
--- 移动到冷存储
+-- 冷热分层
 ALTER TABLE events MODIFY TTL event_date + INTERVAL 7 DAY TO VOLUME 'hot',
                               event_date + INTERVAL 30 DAY TO VOLUME 'cold';
 ```
@@ -486,31 +176,15 @@ ALTER TABLE events MODIFY TTL event_date + INTERVAL 7 DAY TO VOLUME 'hot',
 ### 分区管理
 
 ```sql
--- 查看分区
-SELECT partition, name, rows, bytes_on_disk
-FROM system.parts
-WHERE table = 'events' AND active;
-
--- 删除分区
+-- 查看/删除/分离/附加分区
+SELECT partition, name, rows, bytes_on_disk FROM system.parts WHERE table = 'events' AND active;
 ALTER TABLE events DROP PARTITION '202401';
-
--- 分离分区（备份）
-ALTER TABLE events DETACH PARTITION '202401';
-
--- 附加分区
-ALTER TABLE events ATTACH PARTITION '202401';
 ```
 
 ### 数据去重
 
 ```sql
--- 手动去重
-OPTIMIZE TABLE events FINAL;
-
--- 强制合并
 OPTIMIZE TABLE events FINAL DEDUPLICATE;
-
--- 按条件去重
 OPTIMIZE TABLE events FINAL DEDUPLICATE BY user_id, event_type;
 ```
 
@@ -520,53 +194,22 @@ OPTIMIZE TABLE events FINAL DEDUPLICATE BY user_id, event_type;
 
 ### Schema 设计
 
-```go
-// Go 结构体与 ClickHouse 类型映射
-type Event struct {
-    // Date 类型
-    EventDate time.Time `ch:"event_date"` // Date
+Go 结构体与 ClickHouse 类型映射：
 
-    // DateTime 类型
-    EventTime time.Time `ch:"event_time"` // DateTime
-
-    // 整数类型
-    UserID   uint64 `ch:"user_id"`   // UInt64
-    Count    int32  `ch:"count"`     // Int32
-    SmallNum uint8  `ch:"small_num"` // UInt8
-
-    // 字符串类型
-    Name    string `ch:"name"`    // String
-    FixedID string `ch:"fixed_id"` // FixedString(32)
-
-    // 数组类型
-    Tags []string `ch:"tags"` // Array(String)
-
-    // Nullable
-    Optional *string `ch:"optional"` // Nullable(String)
-
-    // 低基数（枚举优化）
-    Status string `ch:"status"` // LowCardinality(String)
-}
-```
+| Go 类型 | ClickHouse 类型 | 说明 |
+|---------|----------------|------|
+| `time.Time` | Date / DateTime | 日期时间 |
+| `uint64` | UInt64 | 无符号整数 |
+| `string` | String / LowCardinality(String) | 低基数用 LC |
+| `[]string` | Array(String) | 数组 |
+| `*string` | Nullable(String) | 可空 |
 
 ### 连接池配置
 
-```go
-opts := &clickhouse.Options{
-    Addr: []string{"clickhouse1:9000", "clickhouse2:9000"},
-    Auth: clickhouse.Auth{
-        Database: "default",
-        Username: "default",
-        Password: "",
-    },
-    MaxOpenConns:    10,
-    MaxIdleConns:    5,
-    ConnMaxLifetime: 10 * time.Minute,
-    Compression: &clickhouse.Compression{
-        Method: clickhouse.CompressionLZ4,
-    },
-}
-```
+- 多节点地址：`Addr: []string{"ch1:9000", "ch2:9000"}`
+- 启用压缩：`Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4}`
+
+> 完整代码见 [references/examples.md](references/examples.md#8-最佳实践)
 
 ---
 
@@ -576,30 +219,14 @@ opts := &clickhouse.Options{
 # 连接 ClickHouse
 clickhouse-client -h localhost -u default
 
-# 查看表结构
-DESCRIBE TABLE events;
-
 # 查看表大小
-SELECT
-    table,
-    formatReadableSize(sum(bytes)) AS size,
-    sum(rows) AS rows
-FROM system.parts
-WHERE active
-GROUP BY table
-ORDER BY sum(bytes) DESC;
+SELECT table, formatReadableSize(sum(bytes)) AS size, sum(rows) AS rows
+FROM system.parts WHERE active GROUP BY table ORDER BY sum(bytes) DESC;
 
 # 查看慢查询
-SELECT
-    query,
-    query_duration_ms,
-    read_rows,
-    read_bytes
-FROM system.query_log
-WHERE type = 'QueryFinish'
-  AND query_duration_ms > 1000
-ORDER BY query_duration_ms DESC
-LIMIT 10;
+SELECT query, query_duration_ms, read_rows, read_bytes
+FROM system.query_log WHERE type = 'QueryFinish' AND query_duration_ms > 1000
+ORDER BY query_duration_ms DESC LIMIT 10;
 ```
 
 ---
@@ -613,3 +240,9 @@ LIMIT 10;
 - [ ] 使用 PREWHERE 优化查询？
 - [ ] 配置 TTL 自动清理？
 - [ ] 避免 SELECT *？
+
+---
+
+## 参考资料
+
+- [完整代码示例](references/examples.md) — 连接、表引擎 DDL、查询、批量插入、聚合、优化完整实现

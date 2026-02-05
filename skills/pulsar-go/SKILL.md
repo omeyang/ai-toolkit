@@ -1,6 +1,6 @@
 ---
 name: pulsar-go
-description: Go Pulsar 专家 - 消息生产消费、订阅模式、死信队列、链路追踪、Schema 管理。使用场景：异步消息、事件驱动、流处理。
+description: "Go Pulsar 消息队列专家 - 消息生产消费、订阅模式（Exclusive/Shared/Failover/KeyShared）、死信队列、链路追踪、Schema 管理、延迟消息。适用：多租户消息系统、延迟/定时投递、海量 Topic 场景、跨地域复制、多种订阅模式灵活切换。不适用：团队已深度使用 Kafka 且无迁移计划、仅需简单 Pub/Sub（用 Redis Streams/NATS）、运维资源有限（Pulsar 依赖 BookKeeper+ZooKeeper）。触发词：pulsar, 消息队列, producer, consumer, 订阅, DLQ, 死信, 延迟消息, schema, topic, 多租户"
 user-invocable: true
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
@@ -16,50 +16,22 @@ allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ### 创建客户端
 
 ```go
-import (
-    "time"
-
-    "github.com/apache/pulsar-client-go/pulsar"
-)
-
-func NewPulsarClient(serviceURL string) (pulsar.Client, error) {
-    client, err := pulsar.NewClient(pulsar.ClientOptions{
-        URL:                     serviceURL,
-        OperationTimeout:        30 * time.Second,
-        ConnectionTimeout:       10 * time.Second,
-        MaxConnectionsPerBroker: 5,
-        // 认证（可选）
-        // Authentication: pulsar.NewAuthenticationToken("token"),
-    })
-    if err != nil {
-        return nil, fmt.Errorf("create pulsar client: %w", err)
-    }
-
-    return client, nil
-}
+func NewPulsarClient(serviceURL string) (pulsar.Client, error)
 ```
+
+- 配置：OperationTimeout=30s, ConnectionTimeout=10s, MaxConnectionsPerBroker=5
+- 可选认证：`pulsar.NewAuthenticationToken("token")`
 
 ### 包装器模式
 
 ```go
-type Pulsar struct {
-    client pulsar.Client
-}
-
-func New(client pulsar.Client) *Pulsar {
-    return &Pulsar{client: client}
-}
-
-// Client 暴露底层客户端
-func (p *Pulsar) Client() pulsar.Client {
-    return p.client
-}
-
-// Close 关闭客户端
-func (p *Pulsar) Close() {
-    p.client.Close()
-}
+type Pulsar struct { client pulsar.Client }
+func New(client pulsar.Client) *Pulsar
+func (p *Pulsar) Client() pulsar.Client
+func (p *Pulsar) Close()
 ```
+
+> 完整实现见 [references/examples.md](references/examples.md#1-客户端管理)
 
 ---
 
@@ -68,111 +40,31 @@ func (p *Pulsar) Close() {
 ### 创建生产者
 
 ```go
-func (p *Pulsar) CreateProducer(topic string) (pulsar.Producer, error) {
-    producer, err := p.client.CreateProducer(pulsar.ProducerOptions{
-        Topic:                   topic,
-        Name:                    "my-producer",
-        SendTimeout:             10 * time.Second,
-        BatchingMaxPublishDelay: 10 * time.Millisecond,
-        BatchingMaxMessages:     1000,
-        CompressionType:         pulsar.LZ4,
-        // 分区路由
-        MessageRouter: func(msg *pulsar.ProducerMessage, tm pulsar.TopicMetadata) int {
-            // 按 key 路由到固定分区
-            if msg.Key != "" {
-                return int(hash(msg.Key)) % tm.NumPartitions()
-            }
-            return rand.Intn(tm.NumPartitions())
-        },
-    })
-    if err != nil {
-        return nil, fmt.Errorf("create producer: %w", err)
-    }
-
-    return producer, nil
-}
+func (p *Pulsar) CreateProducer(topic string) (pulsar.Producer, error)
 ```
+
+- 批量发送：BatchingMaxPublishDelay=10ms, BatchingMaxMessages=1000
+- 压缩：LZ4
+- 分区路由：按 Key 哈希路由到固定分区
 
 ### 发送消息
 
-```go
-// 同步发送
-func (p *Pulsar) Send(ctx context.Context, producer pulsar.Producer, msg *Message) (pulsar.MessageID, error) {
-    msgID, err := producer.Send(ctx, &pulsar.ProducerMessage{
-        Payload:    msg.Payload,
-        Key:        msg.Key,
-        Properties: msg.Properties,
-        EventTime:  time.Now(),
-    })
-    if err != nil {
-        return nil, fmt.Errorf("send message: %w", err)
-    }
-
-    return msgID, nil
-}
-
-// 异步发送
-func (p *Pulsar) SendAsync(ctx context.Context, producer pulsar.Producer, msg *Message, callback func(pulsar.MessageID, *pulsar.ProducerMessage, error)) {
-    producer.SendAsync(ctx, &pulsar.ProducerMessage{
-        Payload:    msg.Payload,
-        Key:        msg.Key,
-        Properties: msg.Properties,
-        EventTime:  time.Now(),
-    }, callback)
-}
-
-// 批量发送
-func (p *Pulsar) SendBatch(ctx context.Context, producer pulsar.Producer, messages []*Message) error {
-    var wg sync.WaitGroup
-    var mu sync.Mutex
-    var errs []error
-
-    for _, msg := range messages {
-        wg.Add(1)
-        producer.SendAsync(ctx, &pulsar.ProducerMessage{
-            Payload:    msg.Payload,
-            Key:        msg.Key,
-            Properties: msg.Properties,
-        }, func(id pulsar.MessageID, pm *pulsar.ProducerMessage, err error) {
-            defer wg.Done()
-            if err != nil {
-                mu.Lock()
-                errs = append(errs, err)
-                mu.Unlock()
-            }
-        })
-    }
-
-    wg.Wait()
-
-    if len(errs) > 0 {
-        return fmt.Errorf("send batch failed: %d errors", len(errs))
-    }
-    return nil
-}
-```
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| 同步 | `Send(ctx, producer, msg) (MessageID, error)` | 等待确认 |
+| 异步 | `SendAsync(ctx, producer, msg, callback)` | 回调通知 |
+| 批量 | `SendBatch(ctx, producer, messages) error` | 并发异步+WaitGroup |
 
 ### 延迟消息
 
 ```go
-// 发送延迟消息
-func (p *Pulsar) SendDelayed(ctx context.Context, producer pulsar.Producer, msg *Message, delay time.Duration) (pulsar.MessageID, error) {
-    return producer.Send(ctx, &pulsar.ProducerMessage{
-        Payload:      msg.Payload,
-        Key:          msg.Key,
-        DeliverAfter: delay,
-    })
-}
-
+// 延迟投递
+producer.Send(ctx, &pulsar.ProducerMessage{Payload: data, DeliverAfter: 5 * time.Minute})
 // 定时投递
-func (p *Pulsar) SendScheduled(ctx context.Context, producer pulsar.Producer, msg *Message, deliverAt time.Time) (pulsar.MessageID, error) {
-    return producer.Send(ctx, &pulsar.ProducerMessage{
-        Payload:   msg.Payload,
-        Key:       msg.Key,
-        DeliverAt: deliverAt,
-    })
-}
+producer.Send(ctx, &pulsar.ProducerMessage{Payload: data, DeliverAt: targetTime})
 ```
+
+> 完整实现见 [references/examples.md](references/examples.md#2-生产者)
 
 ---
 
@@ -180,145 +72,25 @@ func (p *Pulsar) SendScheduled(ctx context.Context, producer pulsar.Producer, ms
 
 ### 订阅模式
 
-```go
-// Exclusive - 独占模式（只有一个消费者）
-func (p *Pulsar) SubscribeExclusive(topic, subscription string) (pulsar.Consumer, error) {
-    return p.client.Subscribe(pulsar.ConsumerOptions{
-        Topic:            topic,
-        SubscriptionName: subscription,
-        Type:             pulsar.Exclusive,
-    })
-}
+| 模式 | 函数 | 特点 |
+|------|------|------|
+| Exclusive | `SubscribeExclusive()` | 独占，只有一个消费者 |
+| Shared | `SubscribeShared()` | 共享，多消费者轮询 |
+| Failover | `SubscribeFailover()` | 故障转移 |
+| KeyShared | `SubscribeKeyShared()` | 按 Key 分区，保证同 Key 顺序 |
 
-// Shared - 共享模式（多消费者轮询）
-func (p *Pulsar) SubscribeShared(topic, subscription string) (pulsar.Consumer, error) {
-    return p.client.Subscribe(pulsar.ConsumerOptions{
-        Topic:            topic,
-        SubscriptionName: subscription,
-        Type:             pulsar.Shared,
-    })
-}
+### 消费模式
 
-// Failover - 故障转移模式
-func (p *Pulsar) SubscribeFailover(topic, subscription string) (pulsar.Consumer, error) {
-    return p.client.Subscribe(pulsar.ConsumerOptions{
-        Topic:            topic,
-        SubscriptionName: subscription,
-        Type:             pulsar.Failover,
-    })
-}
+| 模式 | 函数 | 说明 |
+|------|------|------|
+| 阻塞接收 | `Consume(ctx, consumer, handler)` | `Receive()` 循环 |
+| Channel | `ConsumeChannel(ctx, consumer, handler)` | `consumer.Chan()` + select |
+| 批量 | `ConsumeBatch(ctx, consumer, batchSize, timeout, handler)` | 攒批处理 |
 
-// KeyShared - 按 Key 分区（保证同 Key 顺序）
-func (p *Pulsar) SubscribeKeyShared(topic, subscription string) (pulsar.Consumer, error) {
-    return p.client.Subscribe(pulsar.ConsumerOptions{
-        Topic:            topic,
-        SubscriptionName: subscription,
-        Type:             pulsar.KeyShared,
-        KeySharedPolicy: pulsar.KeySharedPolicy{
-            Mode: pulsar.KeySharedPolicyModeAutoSplit,
-        },
-    })
-}
-```
+- 成功：`consumer.Ack(msg)`
+- 失败：`consumer.Nack(msg)` 触发重投
 
-### 消费消息
-
-```go
-// 阻塞接收
-func (p *Pulsar) Consume(ctx context.Context, consumer pulsar.Consumer, handler func(pulsar.Message) error) error {
-    for {
-        msg, err := consumer.Receive(ctx)
-        if err != nil {
-            if ctx.Err() != nil {
-                return ctx.Err()
-            }
-            return fmt.Errorf("receive: %w", err)
-        }
-
-        if err := handler(msg); err != nil {
-            // 处理失败，稍后重试
-            consumer.Nack(msg)
-            continue
-        }
-
-        // 处理成功，确认消息
-        consumer.Ack(msg)
-    }
-}
-
-// Channel 接收
-func (p *Pulsar) ConsumeChannel(ctx context.Context, consumer pulsar.Consumer, handler func(pulsar.Message) error) error {
-    msgChan := consumer.Chan()
-
-    for {
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        case msg := <-msgChan:
-            if err := handler(msg); err != nil {
-                consumer.Nack(msg)
-            } else {
-                consumer.Ack(msg)
-            }
-        }
-    }
-}
-```
-
-### 批量消费
-
-```go
-func (p *Pulsar) ConsumeBatch(ctx context.Context, consumer pulsar.Consumer, batchSize int, timeout time.Duration, handler func([]pulsar.Message) error) error {
-    batch := make([]pulsar.Message, 0, batchSize)
-    timer := time.NewTimer(timeout)
-
-    for {
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-
-        case <-timer.C:
-            if len(batch) > 0 {
-                if err := p.processBatch(consumer, batch, handler); err != nil {
-                    return err
-                }
-                batch = batch[:0]
-            }
-            timer.Reset(timeout)
-
-        default:
-            msg, err := consumer.Receive(ctx)
-            if err != nil {
-                continue
-            }
-
-            batch = append(batch, msg)
-
-            if len(batch) >= batchSize {
-                if err := p.processBatch(consumer, batch, handler); err != nil {
-                    return err
-                }
-                batch = batch[:0]
-                timer.Reset(timeout)
-            }
-        }
-    }
-}
-
-func (p *Pulsar) processBatch(consumer pulsar.Consumer, batch []pulsar.Message, handler func([]pulsar.Message) error) error {
-    if err := handler(batch); err != nil {
-        for _, msg := range batch {
-            consumer.Nack(msg)
-        }
-        return err
-    }
-
-    for _, msg := range batch {
-        consumer.Ack(msg)
-    }
-    return nil
-}
-```
+> 完整实现见 [references/examples.md](references/examples.md#3-消费者)
 
 ---
 
@@ -327,46 +99,23 @@ func (p *Pulsar) processBatch(consumer pulsar.Consumer, batch []pulsar.Message, 
 ### 配置 DLQ
 
 ```go
-func (p *Pulsar) SubscribeWithDLQ(topic, subscription string, maxRetries uint32) (pulsar.Consumer, error) {
-    return p.client.Subscribe(pulsar.ConsumerOptions{
-        Topic:            topic,
-        SubscriptionName: subscription,
-        Type:             pulsar.Shared,
-        DLQ: &pulsar.DLQPolicy{
-            MaxDeliveries:   maxRetries,
-            DeadLetterTopic: fmt.Sprintf("%s-dlq", topic),
-            RetryLetterTopic: fmt.Sprintf("%s-retry", topic),
-        },
-        NackRedeliveryDelay: 1 * time.Minute,
-        // 自定义重试延迟
-        NackBackoffPolicy: pulsar.NewExponentialNackBackoffPolicy(
-            1*time.Second,   // 初始延迟
-            60*time.Second,  // 最大延迟
-            2.0,             // 倍数
-        ),
-    })
-}
+consumer, err := p.client.Subscribe(pulsar.ConsumerOptions{
+    Topic: topic, SubscriptionName: subscription, Type: pulsar.Shared,
+    DLQ: &pulsar.DLQPolicy{
+        MaxDeliveries:    maxRetries,
+        DeadLetterTopic:  fmt.Sprintf("%s-dlq", topic),
+        RetryLetterTopic: fmt.Sprintf("%s-retry", topic),
+    },
+    NackRedeliveryDelay: 1 * time.Minute,
+    NackBackoffPolicy: pulsar.NewExponentialNackBackoffPolicy(1*time.Second, 60*time.Second, 2.0),
+})
 ```
 
 ### DLQ 消费者
 
-```go
-func (p *Pulsar) ConsumeDLQ(ctx context.Context, topic string, handler func(pulsar.Message) error) error {
-    dlqTopic := fmt.Sprintf("%s-dlq", topic)
+单独订阅 `<topic>-dlq` 主题处理死信消息。
 
-    consumer, err := p.client.Subscribe(pulsar.ConsumerOptions{
-        Topic:            dlqTopic,
-        SubscriptionName: "dlq-processor",
-        Type:             pulsar.Shared,
-    })
-    if err != nil {
-        return err
-    }
-    defer consumer.Close()
-
-    return p.Consume(ctx, consumer, handler)
-}
-```
+> 完整实现见 [references/examples.md](references/examples.md#4-死信队列dlq)
 
 ---
 
@@ -374,70 +123,17 @@ func (p *Pulsar) ConsumeDLQ(ctx context.Context, topic string, handler func(puls
 
 ### OpenTelemetry 集成
 
+- `TracingProducer`：发送前注入 trace context 到 `msg.Properties`
+- `TracingConsumer`：接收后从 `msg.Properties()` 提取 trace context
+
 ```go
-import (
-    "go.opentelemetry.io/otel"
-    "go.opentelemetry.io/otel/propagation"
-    "go.opentelemetry.io/otel/trace"
-)
-
-type TracingProducer struct {
-    pulsar.Producer
-    tracer trace.Tracer
-}
-
-func WrapProducer(producer pulsar.Producer) *TracingProducer {
-    return &TracingProducer{
-        Producer: producer,
-        tracer:   otel.Tracer("pulsar"),
-    }
-}
-
-func (p *TracingProducer) Send(ctx context.Context, msg *pulsar.ProducerMessage) (pulsar.MessageID, error) {
-    ctx, span := p.tracer.Start(ctx, "pulsar.send",
-        trace.WithSpanKind(trace.SpanKindProducer),
-    )
-    defer span.End()
-
-    // 注入追踪上下文到消息属性
-    if msg.Properties == nil {
-        msg.Properties = make(map[string]string)
-    }
-    otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(msg.Properties))
-
-    return p.Producer.Send(ctx, msg)
-}
-
-type TracingConsumer struct {
-    pulsar.Consumer
-    tracer trace.Tracer
-}
-
-func WrapConsumer(consumer pulsar.Consumer) *TracingConsumer {
-    return &TracingConsumer{
-        Consumer: consumer,
-        tracer:   otel.Tracer("pulsar"),
-    }
-}
-
-func (c *TracingConsumer) Receive(ctx context.Context) (pulsar.Message, error) {
-    msg, err := c.Consumer.Receive(ctx)
-    if err != nil {
-        return nil, err
-    }
-
-    // 从消息属性提取追踪上下文
-    carrier := propagation.MapCarrier(msg.Properties())
-    ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
-
-    _, span := c.tracer.Start(ctx, "pulsar.receive",
-        trace.WithSpanKind(trace.SpanKindConsumer),
-    )
-    defer span.End()
-
-    return msg, nil
-}
+// 生产者包装
+func WrapProducer(producer pulsar.Producer) *TracingProducer
+// 消费者包装
+func WrapConsumer(consumer pulsar.Consumer) *TracingConsumer
 ```
+
+> 完整实现见 [references/examples.md](references/examples.md#5-链路追踪)
 
 ---
 
@@ -446,79 +142,33 @@ func (c *TracingConsumer) Receive(ctx context.Context) (pulsar.Message, error) {
 ### JSON Schema
 
 ```go
-type UserEvent struct {
-    UserID    string    `json:"user_id"`
-    EventType string    `json:"event_type"`
-    Timestamp time.Time `json:"timestamp"`
-    Data      any       `json:"data,omitempty"`
-}
-
-func (p *Pulsar) CreateTypedProducer(topic string) (pulsar.Producer, error) {
-    schema := pulsar.NewJSONSchema(UserEvent{}, nil)
-
-    return p.client.CreateProducer(pulsar.ProducerOptions{
-        Topic:  topic,
-        Schema: schema,
-    })
-}
-
-func (p *Pulsar) SendTyped(ctx context.Context, producer pulsar.Producer, event *UserEvent) (pulsar.MessageID, error) {
-    return producer.Send(ctx, &pulsar.ProducerMessage{
-        Value: event,
-    })
-}
+schema := pulsar.NewJSONSchema(UserEvent{}, nil)
+producer, _ := p.client.CreateProducer(pulsar.ProducerOptions{Topic: topic, Schema: schema})
+producer.Send(ctx, &pulsar.ProducerMessage{Value: &event})
 ```
 
 ### Avro Schema
 
 ```go
-func (p *Pulsar) CreateAvroProducer(topic string, avroSchema string) (pulsar.Producer, error) {
-    schema := pulsar.NewAvroSchema(avroSchema, nil)
-
-    return p.client.CreateProducer(pulsar.ProducerOptions{
-        Topic:  topic,
-        Schema: schema,
-    })
-}
+schema := pulsar.NewAvroSchema(avroSchemaJSON, nil)
 ```
+
+> 完整实现见 [references/examples.md](references/examples.md#6-schema-管理)
 
 ---
 
 ## 7. Reader（非订阅读取）
 
 ```go
-// 从指定位置读取
-func (p *Pulsar) CreateReader(topic string, startMsgID pulsar.MessageID) (pulsar.Reader, error) {
-    return p.client.CreateReader(pulsar.ReaderOptions{
-        Topic:          topic,
-        StartMessageID: startMsgID,
-    })
-}
-
-// 从最早消息读取
-func (p *Pulsar) CreateReaderFromEarliest(topic string) (pulsar.Reader, error) {
-    return p.client.CreateReader(pulsar.ReaderOptions{
-        Topic:          topic,
-        StartMessageID: pulsar.EarliestMessageID(),
-    })
-}
-
-// 从最新消息读取
-func (p *Pulsar) CreateReaderFromLatest(topic string) (pulsar.Reader, error) {
-    return p.client.CreateReader(pulsar.ReaderOptions{
-        Topic:          topic,
-        StartMessageID: pulsar.LatestMessageID(),
-    })
-}
-
-// 读取消息
-func (p *Pulsar) Read(ctx context.Context, reader pulsar.Reader) (pulsar.Message, error) {
-    if reader.HasNext() {
-        return reader.Next(ctx)
-    }
-    return nil, io.EOF
-}
+func (p *Pulsar) CreateReader(topic string, startMsgID pulsar.MessageID) (pulsar.Reader, error)
+func (p *Pulsar) CreateReaderFromEarliest(topic string) (pulsar.Reader, error)
+func (p *Pulsar) CreateReaderFromLatest(topic string) (pulsar.Reader, error)
 ```
+
+- 从指定位置 / 最早 / 最新消息开始读取
+- `reader.HasNext()` + `reader.Next(ctx)` 消费
+
+> 完整实现见 [references/examples.md](references/examples.md#7-reader非订阅读取)
 
 ---
 
@@ -526,22 +176,9 @@ func (p *Pulsar) Read(ctx context.Context, reader pulsar.Reader) (pulsar.Message
 
 ```go
 // 订阅多个主题
-func (p *Pulsar) SubscribeMultiTopic(topics []string, subscription string) (pulsar.Consumer, error) {
-    return p.client.Subscribe(pulsar.ConsumerOptions{
-        Topics:           topics,
-        SubscriptionName: subscription,
-        Type:             pulsar.Shared,
-    })
-}
-
+func (p *Pulsar) SubscribeMultiTopic(topics []string, subscription string) (pulsar.Consumer, error)
 // 正则匹配主题
-func (p *Pulsar) SubscribeTopicPattern(pattern, subscription string) (pulsar.Consumer, error) {
-    return p.client.Subscribe(pulsar.ConsumerOptions{
-        TopicsPattern:    pattern, // e.g., "persistent://tenant/namespace/topic-.*"
-        SubscriptionName: subscription,
-        Type:             pulsar.Shared,
-    })
-}
+func (p *Pulsar) SubscribeTopicPattern(pattern, subscription string) (pulsar.Consumer, error)
 ```
 
 ---
@@ -549,21 +186,18 @@ func (p *Pulsar) SubscribeTopicPattern(pattern, subscription string) (pulsar.Con
 ## 最佳实践
 
 ### 生产者
-
 - 使用异步发送提高吞吐量
 - 启用批量发送（BatchingMaxMessages）
 - 启用压缩（LZ4/ZSTD）
 - 设置合理的 SendTimeout
 
 ### 消费者
-
 - 根据场景选择订阅模式
 - 使用 DLQ 处理持续失败的消息
 - 配置合理的 NackRedeliveryDelay
 - 批量处理提高效率
 
 ### 消息设计
-
 - 使用 Key 保证相关消息顺序
 - 设置 EventTime 用于时间窗口处理
 - 使用 Properties 传递元数据
@@ -581,3 +215,9 @@ func (p *Pulsar) SubscribeTopicPattern(pattern, subscription string) (pulsar.Con
 - [ ] 使用 Schema 保证类型安全？
 - [ ] 正确处理 Ack/Nack？
 - [ ] 优雅关闭释放资源？
+
+---
+
+## 参考资料
+
+- [完整代码示例](references/examples.md) — 客户端、生产者、消费者、DLQ、追踪、Schema、Reader 完整实现

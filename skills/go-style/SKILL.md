@@ -1,6 +1,6 @@
 ---
 name: go-style
-description: Go 代码规范与后端开发专家 - 惯用法、代码审查、HTTP 服务、API 设计。使用场景：代码审查、重构、后端开发、API 实现。
+description: "Go 代码规范与后端开发专家 - 接口设计(使用方定义)、并发安全(goroutine退出策略)、错误处理(%w包装)、命名规范、HTTP服务(handler/路由/中间件/JSON helper)、项目结构(cmd/internal/pkg)、API设计(函数选项/Context)、golangci-lint配置。适用：代码审查、Go惯用法重构、HTTP后端开发、API设计、项目结构规划。不适用：非Go语言项目、前端开发、纯算法实现(应使用algorithms技能)。触发词：go style, 代码规范, code review, 代码审查, http handler, 中间件, middleware, 项目结构, 命名规范, golangci-lint, 惯用法, idiomatic go"
 user-invocable: true
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
