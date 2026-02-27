@@ -1,6 +1,6 @@
 # 技能包目录
 
-技能包总数：18
+技能包总数：19
 
 | 技能包 | 描述 | 路径 |
 |---|---|---|
@@ -8,6 +8,7 @@
 | `api-design-go` | Go API 设计专家 - RESTful 规范、版本控制、分页策略、错误处理、HATEOAS、契约优先。使用场景：HTTP API、微服务接口、公开 API。 | `skills/api-design-go/SKILL.md` |
 | `backend-patterns` | 后端架构模式专家 - 分层架构、Repository 模式、缓存策略、错误处理、认证授权、限流、队列、日志。使用场景：系统设计、架构决策、服务开发。 | `skills/backend-patterns/SKILL.md` |
 | `clickhouse-go` | Go ClickHouse 专家 - OLAP 分析、表引擎选择、查询优化、批量插入、分页查询。使用场景：数据分析、实时报表、日志存储。 | `skills/clickhouse-go/SKILL.md` |
+| `cr` | 代码审查专家 - 三种模式：local（本地快速审查）、pr（PR 差异审查）、teams（多 Agent 对抗审查）。覆盖 Go/Python/Shell，A/B/C 优先级检查清单，风险矩阵驱动修复决策。使用场景：代码审查、PR Review、安全扫描、质量把关。 | `skills/cr/SKILL.md` |
 | `design-patterns` | 设计模式与架构专家 - 覆盖 GoF 经典模式、云架构模式、Go 并发模式、SOLID/DDD 等。使用场景：系统设计、代码重构、架构决策、分布式系统。 | `skills/design-patterns/SKILL.md` |
 | `etcd-go` | Go etcd 专家 - KV 存储、Watch 监听、分布式锁、租约管理、选主。使用场景：配置中心、服务发现、分布式协调。 | `skills/etcd-go/SKILL.md` |
 | `go-style` | Go 代码规范与后端开发专家 - 惯用法、代码审查、HTTP 服务、API 设计。使用场景：代码审查、重构、后端开发、API 实现。 | `skills/go-style/SKILL.md` |
