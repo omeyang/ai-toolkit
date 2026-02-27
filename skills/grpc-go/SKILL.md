@@ -1,6 +1,6 @@
 ---
 name: grpc-go
-description: "Go gRPC 专家 - 服务定义(Proto)、Unary/Stream RPC、拦截器(日志/认证/恢复)、错误处理与错误码映射、元数据传播、负载均衡、健康检查、优雅关闭。适用：微服务通信、API 网关、内部服务间调用、流式数据传输。不适用：浏览器直连(用 gRPC-Web 或 REST)；简单 CRUD API(REST 更轻量)；消息队列场景(用 Kafka/Pulsar)。触发词：grpc, gRPC, protobuf, proto, 拦截器, interceptor, streaming, 流式, metadata, 元数据, service-config"
+description: "Go gRPC 专家 - 服务定义(Proto)、Unary/Stream RPC、拦截器(日志/认证/恢复/限流/租户/追踪)、错误处理与错误码映射、元数据传播、负载均衡、健康检查、优雅关闭。适用：微服务通信、API 网关、内部服务间调用、流式数据传输。不适用：浏览器直连(用 gRPC-Web 或 REST)；简单 CRUD API(REST 更轻量)；消息队列场景(用 Kafka/Pulsar)。触发词：grpc, gRPC, protobuf, proto, 拦截器, interceptor, streaming, 流式, metadata, 元数据, service-config"
 user-invocable: true
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
@@ -64,18 +64,20 @@ type UserServer struct {
 
 > 完整四种 RPC 实现见 [references/examples.md](references/examples.md#服务端实现)
 
-### 启动服务
+### 启动服务（含拦截器链）
 
 ```go
 server := grpc.NewServer(
     grpc.ChainUnaryInterceptor(
+        xtenant.GRPCUnaryServerInterceptor(xtenant.WithGRPCRequireTenantID()),
+        xtrace.GRPCUnaryServerInterceptor(),
+        xlimit.UnaryServerInterceptor(limiter),
         LoggingInterceptor(),
-        RecoveryInterceptor(),
-        TracingInterceptor(),
     ),
     grpc.ChainStreamInterceptor(
-        StreamLoggingInterceptor(),
-        StreamRecoveryInterceptor(),
+        xtenant.GRPCStreamServerInterceptor(),
+        xtrace.GRPCStreamServerInterceptor(),
+        xlimit.StreamServerInterceptor(limiter),
     ),
 )
 userv1.RegisterUserServiceServer(server, NewUserServer(repo))
@@ -88,10 +90,19 @@ reflection.Register(server) // 调试用
 
 ### 创建客户端
 
-使用 `grpc.NewClient`，配置负载均衡、超时、重试策略。
-
 ```go
-func NewUserClient(target string) (userv1.UserServiceClient, func(), error)
+conn, err := grpc.NewClient(target,
+    grpc.WithTransportCredentials(insecure.NewCredentials()),
+    grpc.WithChainUnaryInterceptor(
+        xtenant.GRPCUnaryClientInterceptor(),   // 自动传播租户信息
+        xtrace.GRPCUnaryClientInterceptor(),     // 自动传播 trace 信息
+    ),
+    grpc.WithChainStreamInterceptor(
+        xtenant.GRPCStreamClientInterceptor(),
+        xtrace.GRPCStreamClientInterceptor(),
+    ),
+    grpc.WithDefaultServiceConfig(serviceConfig),
+)
 ```
 
 > 完整客户端创建和调用示例见 [references/examples.md](references/examples.md#客户端实现)
@@ -100,21 +111,74 @@ func NewUserClient(target string) (userv1.UserServiceClient, func(), error)
 
 ## 4. 拦截器
 
-### Unary 服务端拦截器
+### XKit 提供的拦截器
 
-- **LoggingInterceptor**: 记录方法、状态码、耗时
-- **RecoveryInterceptor**: 捕获 panic，返回 Internal 错误
-- **AuthInterceptor**: 从 metadata 提取 token，跳过公开方法
+| 包 | 拦截器 | 功能 |
+|------|--------|------|
+| `xtenant` | `GRPCUnaryServerInterceptor` | 从 metadata 提取租户信息注入 context |
+| `xtenant` | `GRPCUnaryClientInterceptor` | 自动将租户信息注入 outgoing metadata |
+| `xtrace` | `GRPCUnaryServerInterceptor` | 提取 trace info（含 W3C traceparent） |
+| `xtrace` | `GRPCUnaryClientInterceptor` | 注入 trace info 到 outgoing metadata |
+| `xlimit` | `UnaryServerInterceptor` | 多维限流（按 tenant/caller/method） |
 
-### Stream 服务端拦截器
+所有拦截器同时提供 Unary 和 Stream 版本。
 
-- **StreamLoggingInterceptor**: 流式 RPC 日志
-- **wrappedStream**: 包装 ServerStream 以拦截 Recv/Send
+### 租户拦截器选项
 
-### 客户端拦截器
+```go
+WithGRPCRequireTenant()     // 要求 TenantID + TenantName
+WithGRPCRequireTenantID()   // 仅要求 TenantID
+WithGRPCEnsureTrace()       // 自动生成缺失的 trace 字段
+```
 
-- **ClientLoggingInterceptor**: 客户端调用日志
-- **ClientMetadataInterceptor**: 自动注入 request-id、tenant-id
+### 限流拦截器
+
+```go
+xlimit.UnaryServerInterceptor(limiter,
+    xlimit.WithGRPCKeyExtractor(extractor),           // 自定义 Key 提取
+    xlimit.WithGRPCSkipFunc(func(ctx, info) bool {    // 跳过特定方法
+        return info.FullMethod == "/health"
+    }),
+)
+// 限流拒绝返回 codes.ResourceExhausted + retry_after
+```
+
+### 自定义拦截器
+
+```go
+// Recovery 拦截器
+func RecoveryInterceptor() grpc.UnaryServerInterceptor {
+    return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+        defer func() {
+            if r := recover(); r != nil {
+                err = status.Errorf(codes.Internal, "panic: %v", r)
+            }
+        }()
+        return handler(ctx, req)
+    }
+}
+
+// Logging 拦截器
+func LoggingInterceptor() grpc.UnaryServerInterceptor {
+    return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+        start := time.Now()
+        resp, err := handler(ctx, req)
+        slog.InfoContext(ctx, "grpc call", slog.String("method", info.FullMethod),
+            slog.Duration("duration", time.Since(start)), slog.Any("error", err))
+        return resp, err
+    }
+}
+```
+
+### wrappedServerStream（Stream Context 覆盖）
+
+```go
+type wrappedServerStream struct {
+    grpc.ServerStream
+    ctx context.Context
+}
+func (w *wrappedServerStream) Context() context.Context { return w.ctx }
+```
 
 > 完整拦截器实现见 [references/examples.md](references/examples.md#拦截器实现)
 
@@ -153,14 +217,30 @@ func ValidationError(field, description string) error
 
 ## 6. 元数据传播
 
-| 方向 | API |
-|------|-----|
-| 服务端提取 | `metadata.FromIncomingContext(ctx)` |
-| 服务端注入响应头 | `grpc.SendHeader(ctx, md)` / `grpc.SetTrailer(ctx, md)` |
-| 客户端发送 | `metadata.NewOutgoingContext(ctx, md)` |
-| 客户端接收 | `grpc.Header(&header)` / `grpc.Trailer(&trailer)` |
+### Metadata Keys 规范
 
-> 完整元数据操作示例见 [references/examples.md](references/examples.md#元数据传播实现)
+| 类别 | Keys | 格式 |
+|------|------|------|
+| 租户 | `x-tenant-id`, `x-tenant-name`, `x-platform-id` | 小写带连字符 |
+| 追踪 | `x-trace-id`, `x-span-id`, `x-request-id` | 小写带连字符 |
+| W3C | `traceparent`, `tracestate` | W3C 标准格式 |
+
+### 提取与注入
+
+```go
+// 服务端提取
+info := xtenant.ExtractFromIncomingContext(ctx)
+trace := xtrace.ExtractFromIncomingContext(ctx)
+
+// 客户端注入（自动）
+ctx = xtenant.InjectToOutgoingContext(ctx)  // Set 覆盖语义，防止 tenant leakage
+```
+
+### 安全注意事项
+
+- 使用 `md.Set()` 覆盖而非 `md.Append()`，防止租户泄露
+- gRPC metadata 使用小写 key（`x-tenant-id`），HTTP Header 使用标准格式（`X-Tenant-ID`）
+- `md.Copy()` 避免修改原始 metadata
 
 ---
 
@@ -181,9 +261,8 @@ healthServer.SetServingStatus("user.v1.UserService", grpc_health_v1.HealthCheckR
 ## 8. 优雅关闭
 
 ```go
-// GracefulStop 等待现有请求完成 + 超时强制关闭
-server.GracefulStop()       // 优雅
-server.Stop()               // 强制（超时后备用）
+server.GracefulStop()  // 等待现有请求完成
+server.Stop()          // 超时后强制关闭
 ```
 
 > 完整优雅关闭模式见 [references/examples.md](references/examples.md#优雅关闭实现)
@@ -210,23 +289,21 @@ conn, err := grpc.NewClient(target,
 - 使用版本化包名 (v1, v2)
 - 请求/响应使用独立 message
 - 使用 google.protobuf 标准类型
-- 添加字段注释
+
+### 拦截器
+- 使用 `ChainUnaryInterceptor` 组合多个拦截器
+- 推荐顺序：租户 → 追踪 → 限流 → 认证 → 日志
+- 所有拦截器同时配置 Unary + Stream 版本
 
 ### 错误处理
 - 使用标准 gRPC 错误码
 - 错误详情用于调试
 - 客户端区分可重试/不可重试错误
 
-### 性能
-- 复用客户端连接
-- 使用连接池
-- 合理设置超时
-- 大数据用流式 RPC
-
 ### 可观测性
-- 统一拦截器记录日志/追踪
-- 传播请求 ID 和租户 ID
-- 实现健康检查
+- 使用 xtenant + xtrace 拦截器自动传播上下文
+- xlimit 返回 `codes.ResourceExhausted` + retry_after
+- 健康检查端点注册到 gRPC health 服务
 
 ---
 
@@ -235,11 +312,12 @@ conn, err := grpc.NewClient(target,
 - [ ] Proto 文件版本化？
 - [ ] 实现健康检查服务？
 - [ ] 配置合理超时？
-- [ ] 日志/追踪拦截器？
+- [ ] 租户/追踪拦截器？
+- [ ] 限流拦截器（xlimit）？
 - [ ] 错误码映射完整？
 - [ ] 客户端启用重试？
 - [ ] 优雅关闭？
-- [ ] 元数据传播？
+- [ ] 元数据用 Set 覆盖语义？
 
 ---
 

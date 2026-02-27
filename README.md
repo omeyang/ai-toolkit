@@ -4,7 +4,7 @@ AI 构建块统一仓库：技能包、MCP 服务器、代理、钩子、工作�
 
 ## 范围
 
-- `skills/`：可复用技能包（18 个 Go 全栈技能）
+- `skills/`：可复用技能包（19 个 Go 全栈技能）
 - `mcp/`：MCP 服务器配置模板（K8s/MongoDB/ClickHouse/Redis/Kafka/OTel/GitHub）
 - `agents/`：代理定义（Go 开发/代码审查/K8s 运维/数据库/安全审计）
 - `hooks/`：事件钩子脚本（格式化/lint/测试/安全拦截/上下文注入）
@@ -20,7 +20,7 @@ AI 构建块统一仓库：技能包、MCP 服务器、代理、钩子、工作�
 
 ```text
 ai-toolkit/
-├── skills/          # 18 个技能包 (Go 全栈)
+├── skills/          # 19 个技能包 (Go 全栈)
 ├── hooks/           # 6 个 Hook 脚本 + 2 个配置模板
 │   ├── scripts/     # go-format, go-lint, go-test-async, block-dangerous, session-context, commit-lint
 │   └── configs/     # settings.json (完整/最小)

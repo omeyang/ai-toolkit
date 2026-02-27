@@ -13,33 +13,44 @@ allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 
 ## 1. 客户端管理
 
-### 创建客户端
+### 配置与创建
 
 ```go
-func NewEtcdClient(endpoints []string) (*clientv3.Client, error) {
-    client, err := clientv3.New(clientv3.Config{
-        Endpoints:   endpoints,
-        DialTimeout: 5 * time.Second,
-    })
-    if err != nil {
-        return nil, fmt.Errorf("create etcd client: %w", err)
-    }
-
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-    _, err = client.Status(ctx, endpoints[0])
-    if err != nil {
-        return nil, fmt.Errorf("check etcd status: %w", err)
-    }
-    return client, nil
+type Config struct {
+    Endpoints            []string      // 必需: ["host1:2379", "host2:2379"]
+    Username             string        // 可选: 认证用户名
+    Password             string        // 可选: 认证密码
+    DialTimeout          time.Duration // 默认: 5s
+    DialKeepAliveTime    time.Duration // 默认: 10s
+    DialKeepAliveTimeout time.Duration // 默认: 3s
+    AutoSyncInterval     time.Duration // 默认: 0（禁用）
+    RejectOldCluster     bool          // 默认: true（安全默认）
+    PermitWithoutStream  bool          // 默认: true（保活）
 }
+
+func DefaultConfig() *Config
+func (c *Config) Validate() error  // 校验 host:port 格式（支持 IPv4/IPv6/域名）
 ```
 
-### 包装器模式
+### 客户端结构
 
-- `Etcd{client, prefix}` - 封装客户端 + key 前缀
-- `key(key string) string` - 构建完整 key = prefix + key
-- 哨兵错误：`ErrKeyNotFound`、`ErrNoLeader`
+```go
+type Client struct {
+    client    etcdClient       // 接口，支持 mock 测试
+    rawClient *clientv3.Client // 高级操作时直接使用
+    config    *Config
+    closed    atomic.Bool
+}
+
+func NewClient(config *Config, opts ...Option) (*Client, error)
+func (c *Client) RawClient() *clientv3.Client  // 获取底层客户端
+func (c *Client) Close() error
+
+// 选项
+WithContext(ctx context.Context) Option
+WithHealthCheck(enabled bool, timeout time.Duration) Option
+WithTLS(config *tls.Config) Option
+```
 
 ---
 
@@ -47,67 +58,201 @@ func NewEtcdClient(endpoints []string) (*clientv3.Client, error) {
 
 ### 基本 CRUD
 
-- `Put(ctx, key, value)` - 写入
-- `PutWithTTL(ctx, key, value, ttl)` - 带过期时间写入（Grant lease + WithLease）
-- `Get(ctx, key)` - 读取单个 key
-- `GetWithPrefix(ctx, prefix)` - 前缀查询，返回 `map[string]string`
-- `Delete(ctx, key)` / `DeleteWithPrefix(ctx, prefix)` - 删除
+```go
+func (c *Client) Get(ctx context.Context, key string) ([]byte, error)
+func (c *Client) GetWithRevision(ctx context.Context, key string) ([]byte, int64, error)
+func (c *Client) Put(ctx context.Context, key string, value []byte) error
+func (c *Client) PutWithTTL(ctx context.Context, key string, value []byte, ttl time.Duration) error
+func (c *Client) Delete(ctx context.Context, key string) error
+func (c *Client) DeleteWithPrefix(ctx context.Context, prefix string) (int64, error)
+```
 
-### 原子操作
+### 查询操作
 
-- `CompareAndSwap(ctx, key, oldValue, newValue)` - CAS 操作（Txn + Compare Value）
-- `PutIfAbsent(ctx, key, value)` - 不存在则创建（Txn + Compare CreateRevision == 0）
+```go
+func (c *Client) List(ctx context.Context, prefix string) (map[string][]byte, error)
+func (c *Client) ListKeys(ctx context.Context, prefix string) ([]string, error)
+func (c *Client) Exists(ctx context.Context, key string) (bool, error)
+func (c *Client) Count(ctx context.Context, prefix string) (int64, error)
+```
+
+### PutWithTTL 实现原理
+
+```go
+// 内部: Grant lease → Put with lease → 失败时 Revoke lease 清理
+func (c *Client) PutWithTTL(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+    lease, err := c.client.Grant(ctx, int64(ttl.Seconds()))
+    // ...
+    _, err = c.client.Put(ctx, key, string(value), clientv3.WithLease(lease.ID))
+    // 失败时自动清理: c.tryRevokeLease(lease.ID)
+}
+```
 
 ---
 
 ## 3. Watch 监听
 
-- `Watch(ctx, key, handler)` - 监听单个 key 变化
-- `WatchPrefix(ctx, prefix, handler)` - 监听前缀下所有 key
-- `WatchWithHandler(ctx, prefix, WatchHandler{OnPut, OnDelete})` - 结构化处理器，区分 Put/Delete 事件
+### Event 类型
+
+```go
+type EventType int
+const (
+    EventPut    EventType = iota
+    EventDelete
+)
+
+type Event struct {
+    Type            EventType
+    Key             string
+    Value           []byte        // DELETE 时为 nil
+    Revision        int64         // ModRevision
+    CompactRevision int64         // etcd 压缩版本
+    Error           error         // 非 nil 表示故障
+}
+```
+
+### Watch 方法
+
+```go
+// 基础 Watch（不自动重连）
+func (c *Client) Watch(ctx context.Context, key string, opts ...WatchOption) (<-chan Event, error)
+
+// 带自动重连的 Watch（推荐生产环境使用）
+func (c *Client) WatchWithRetry(ctx context.Context, key string, cfg RetryConfig, opts ...WatchOption) (<-chan Event, error)
+```
+
+### Watch 选项
+
+```go
+WithPrefix() WatchOption                   // 前缀匹配
+WithRevision(rev int64) WatchOption        // 从指定 revision 开始
+WithBufferSize(size int) WatchOption       // channel 缓冲区大小（默认 256）
+```
+
+### 重试配置
+
+```go
+type RetryConfig struct {
+    InitialBackoff    time.Duration // 默认: 1s
+    MaxBackoff        time.Duration // 默认: 30s
+    BackoffMultiplier float64       // 默认: 2.0
+    MaxRetries        int           // 默认: 0（无限重试）
+    OnRetry           func(attempt int, err error, nextBackoff time.Duration, lastRevision int64)
+}
+
+func DefaultRetryConfig() RetryConfig
+```
 
 ---
 
 ## 4. 分布式锁
 
-- `Lock(ctx, lockKey, ttl)` - 基本锁，返回 unlock 函数（使用 concurrency 包）
-- `TryLock(ctx, lockKey, ttl)` - 非阻塞锁，返回 (unlock, acquired, error)
-- `LockWithTimeout(ctx, lockKey, ttl, timeout)` - 带超时的锁
-- **注意**：unlock 使用独立 context，避免原始 ctx 取消后无法释放锁
+xetcd 本身**不内置分布式锁**。两种方式实现：
+
+### 方式一：使用 xdlock 包（推荐）
+
+```go
+// xdlock 是独立的分布式锁包，支持 etcd 后端
+lock := xdlock.New(etcdClient, "resource-key", xdlock.WithTTL(10*time.Second))
+err := lock.Lock(ctx)
+defer lock.Unlock(ctx)
+```
+
+### 方式二：通过 RawClient 使用 concurrency 包
+
+```go
+session, err := concurrency.NewSession(client.RawClient(), concurrency.WithTTL(10))
+defer session.Close()
+mutex := concurrency.NewMutex(session, "/locks/resource")
+err = mutex.Lock(ctx)
+defer mutex.Unlock(context.Background())  // 使用独立 context 释放锁
+```
 
 ---
 
 ## 5. 租约管理
 
-- `GrantLease(ctx, ttl)` - 创建租约
-- `KeepAlive(ctx, leaseID)` / `StartKeepAlive(ctx, leaseID)` - 自动续租（goroutine drain channel 防泄漏）
-- `RegisterService(ctx, serviceName, instanceID, addr, ttl)` - 服务注册（lease + keepalive）
-- `Deregister(ctx)` - 服务注销（Revoke lease）
+### 通过 PutWithTTL 使用（简单场景）
+
+```go
+// 服务注册：key 会在 TTL 后自动过期
+client.PutWithTTL(ctx, "/services/myapp/instance1", []byte("addr:port"), 10*time.Second)
+```
+
+### 通过 RawClient 手动管理（高级场景）
+
+```go
+raw := client.RawClient()
+lease, _ := raw.Grant(ctx, 30)           // 创建 30s 租约
+ch, _ := raw.KeepAlive(ctx, lease.ID)    // 自动续租
+// 必须 drain ch 防止泄漏
+go func() { for range ch {} }()
+```
 
 ---
 
 ## 6. 选主（Leader Election）
 
-- `Campaign(ctx, electionKey, value, ttl)` - 参与选举（阻塞直到成为 leader）
-- `Observe(ctx, electionKey)` - 观察 leader 变化（返回 channel + cleanup 函数）
-- `GetLeader(ctx, electionKey)` - 获取当前 leader
-- `Resign(ctx, election)` - 主动放弃 leader（使用独立 context）
+通过 RawClient 使用 concurrency 包：
+
+```go
+raw := client.RawClient()
+session, _ := concurrency.NewSession(raw, concurrency.WithTTL(15))
+election := concurrency.NewElection(session, "/election/leader")
+
+// 参与选举（阻塞直到成为 leader）
+err := election.Campaign(ctx, "my-instance-id")
+
+// 观察 leader 变化
+ch := election.Observe(ctx)
+
+// 获取当前 leader
+resp, _ := election.Leader(ctx)
+
+// 主动放弃
+election.Resign(context.Background())  // 使用独立 context
+```
 
 ---
 
 ## 7. 事务
 
-- `Transaction(ctx, ops, conditions)` - 通用事务（If-Then 模式）
-- `UpdateMultiple(ctx, kvs)` - 原子更新多个 key
+通过 RawClient 使用 Txn API：
+
+```go
+raw := client.RawClient()
+
+// CAS (Compare-And-Swap)
+resp, err := raw.Txn(ctx).
+    If(clientv3.Compare(clientv3.Value("key"), "=", "old-value")).
+    Then(clientv3.OpPut("key", "new-value")).
+    Else(clientv3.OpGet("key")).
+    Commit()
+
+// 不存在则创建
+resp, err := raw.Txn(ctx).
+    If(clientv3.Compare(clientv3.CreateRevision("key"), "=", 0)).
+    Then(clientv3.OpPut("key", "value")).
+    Commit()
+```
 
 ---
 
-## 8. 配置中心
+## 8. 错误处理
 
-- `ConfigCenter{etcd, configs sync.Map}` - 基于 etcd 的配置中心
-- `Load(ctx, prefix)` - 加载配置
-- `Watch(ctx, prefix)` - 监听配置变化（自动更新本地缓存）
-- `Get(key)` - 获取配置（从 sync.Map 读取）
+```go
+var (
+    ErrNilConfig       = errors.New("xetcd: config is nil")
+    ErrNoEndpoints     = errors.New("xetcd: no endpoints configured")
+    ErrInvalidEndpoint = errors.New("xetcd: invalid endpoint format")
+    ErrKeyNotFound     = errors.New("xetcd: key not found")
+    ErrClientClosed    = errors.New("xetcd: client is closed")
+    ErrEmptyKey        = errors.New("xetcd: key is empty")
+)
+
+func IsKeyNotFound(err error) bool
+func IsClientClosed(err error) bool
+```
 
 ---
 
@@ -116,22 +261,22 @@ func NewEtcdClient(endpoints []string) (*clientv3.Client, error) {
 ### 连接管理
 - 使用多个 endpoints 实现高可用
 - 配置合理的 DialTimeout
-- 正确处理连接断开和重连
+- 启用 HealthCheck 验证连接
 
 ### Key 设计
 - 使用前缀组织 key（如 `/app/config/`）
 - 避免 key 过长
 - 使用目录结构表达层级关系
 
-### 租约
-- 服务注册使用租约自动清理
-- 合理设置 TTL（不要太短导致频繁续租）
-- 正确处理续租失败
+### Watch
+- 生产环境使用 `WatchWithRetry`
+- 配置 `OnRetry` 回调监控重连情况
+- Error Event 包含 Revision 用于恢复
 
 ### 分布式锁
-- 使用 concurrency 包而非手动实现
-- 设置合理的锁超时
-- 确保锁释放（使用 defer）
+- 使用 xdlock 或 concurrency 包，不要手动实现
+- unlock 使用独立 context（`context.Background()`），避免原始 ctx 取消后无法释放
+- 设置合理的锁 TTL
 
 ---
 
@@ -140,10 +285,10 @@ func NewEtcdClient(endpoints []string) (*clientv3.Client, error) {
 - [ ] 配置多个 endpoints？
 - [ ] 正确处理连接超时？
 - [ ] Key 使用前缀组织？
-- [ ] 使用租约自动清理？
-- [ ] 分布式锁正确释放？
-- [ ] Watch 处理重连？
-- [ ] 事务保证原子性？
+- [ ] Watch 使用 WatchWithRetry？
+- [ ] 分布式锁释放使用独立 context？
+- [ ] PutWithTTL 用于临时数据？
+- [ ] 事务用 RawClient Txn API？
 - [ ] 优雅关闭客户端？
 
 ## 参考资料
