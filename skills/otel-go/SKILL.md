@@ -11,22 +11,144 @@ allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 
 ---
 
-## 1. SDK 初始化
+## 1. Observer 抽象模式
 
-### 完整初始化（推荐）
+XKit 使用 `xmetrics.Observer` 统一观测接口，底层可切换 OTel 或 NoOp 实现。
+
+### 核心接口
 
 ```go
-func InitOTel(ctx context.Context, cfg OTelConfig) (shutdown func(context.Context) error, err error)
+// Observer - 统一观测接口
+type Observer interface {
+    Start(ctx context.Context, opts SpanOptions) (context.Context, Span)
+}
+
+// Span - 观测区间
+type Span interface {
+    End(result Result)
+}
+
+// SpanOptions - 观测配置
+type SpanOptions struct {
+    Component string   // 组件名 (如 "user-service")
+    Operation string   // 操作名 (如 "GetUser")
+    Kind      Kind     // Internal/Server/Client/Producer/Consumer
+    Attrs     []Attr   // 自定义属性
+}
+
+// Result - 操作结果
+type Result struct {
+    Status Status  // StatusOK 或 StatusError（未设置时从 Err 推导）
+    Err    error
+    Attrs  []Attr  // 结果属性
+}
 ```
 
-- 创建 Resource（service.name, version, environment）
-- 初始化 TracerProvider + MeterProvider + LoggerProvider
-- 设置 Propagator（TraceContext + Baggage）
-- 返回统一 shutdown 函数，确保数据导出
+### 使用示例
 
-> 完整实现见 [references/examples.md](references/examples.md#1-sdk-初始化)
+```go
+ctx, span := observer.Start(ctx, xmetrics.SpanOptions{
+    Component: "order-service",
+    Operation: "CreateOrder",
+    Kind:      xmetrics.KindServer,
+    Attrs: []xmetrics.Attr{xmetrics.String("order.id", orderID)},
+})
+defer span.End(xmetrics.Result{Err: err})
+```
 
-### Provider 创建签名
+### NoOp 实现（用于测试或禁用观测）
+
+```go
+type NoopObserver struct{}
+func (NoopObserver) Start(ctx context.Context, _ SpanOptions) (context.Context, Span) {
+    return ctx, NoopSpan{}
+}
+
+// 安全的 nil 检查辅助函数
+func Start(ctx context.Context, observer Observer, opts SpanOptions) (context.Context, Span) {
+    if observer == nil { return ctx, NoopSpan{} }
+    return observer.Start(ctx, opts)
+}
+```
+
+---
+
+## 2. OTel Observer 实现
+
+### 初始化
+
+```go
+// 默认使用全局 OTel Provider
+observer, err := xmetrics.NewOTelObserver()
+
+// 自定义 Provider
+observer, err := xmetrics.NewOTelObserver(
+    xmetrics.WithInstrumentationName("my-service"),
+    xmetrics.WithTracerProvider(tp),
+    xmetrics.WithMeterProvider(mp),
+)
+```
+
+### 自动记录的标准指标
+
+| 指标名 | 类型 | 说明 |
+|--------|------|------|
+| `xkit.operation.total` | Counter | 操作总数（按 component/operation/status 分组） |
+| `xkit.operation.duration` | Histogram | 操作耗时（秒） |
+
+### Span 结束时自动行为
+
+```go
+func (s *otelSpan) End(result Result) {
+    s.endOnce.Do(func() {  // 幂等 - 多次调用只记录一次
+        if result.Err != nil {
+            s.span.RecordError(result.Err)
+            s.span.SetStatus(codes.Error, result.Err.Error())
+        }
+        // 使用 context.WithoutCancel 确保超时/取消场景下指标也能记录
+        metricsCtx := context.WithoutCancel(s.ctx)
+        s.observer.total.Add(metricsCtx, 1, ...)
+        s.observer.duration.Record(metricsCtx, elapsed, ...)
+    })
+}
+```
+
+### 双向同步（OTel Span ↔ xctx）
+
+```go
+// OTel span 创建后，自动同步到 xctx
+func syncXctx(ctx context.Context, sc trace.SpanContext) context.Context {
+    ctx, _ = xctx.WithTraceID(ctx, sc.TraceID().String())
+    ctx, _ = xctx.WithSpanID(ctx, sc.SpanID().String())
+    ctx, _ = xctx.WithTraceFlags(ctx, fmt.Sprintf("%02x", sc.TraceFlags()))
+    return ctx
+}
+```
+
+> 完整 OTel Observer 实现见 [references/examples.md](references/examples.md#1-sdk-初始化)
+
+---
+
+## 3. OTel SDK 初始化
+
+### 完整初始化模板
+
+```go
+func InitOTel(ctx context.Context, cfg OTelConfig) (shutdown func(context.Context) error, err error) {
+    res, err := resource.New(ctx,
+        resource.WithAttributes(
+            semconv.ServiceNameKey.String(cfg.ServiceName),
+            semconv.ServiceVersionKey.String(cfg.Version),
+            attribute.String("environment", cfg.Environment),
+        ),
+    )
+    // 创建 TracerProvider + MeterProvider + LoggerProvider
+    // 设置 Propagator（TraceContext + Baggage）
+    // 返回统一 shutdown 函数
+}
+```
+
+### Provider 创建
 
 ```go
 func newTracerProvider(ctx context.Context, res *resource.Resource, endpoint string) (*trace.TracerProvider, error)
@@ -36,9 +158,9 @@ func newLoggerProvider(ctx context.Context, res *resource.Resource, endpoint str
 
 ---
 
-## 2. 分布式追踪
+## 4. 分布式追踪
 
-### 创建 Span
+### 直接使用 OTel API 创建 Span
 
 ```go
 tracer := otel.Tracer("order-service")
@@ -53,18 +175,17 @@ defer span.End()
 - `span.RecordError()` 记录错误
 - `span.SetStatus(codes.Error, msg)` 设置状态
 
-### Span 属性规范
+### Span 属性规范（semconv）
 
-使用语义属性 `semconv`：
 - **HTTP**: `HTTPRequestMethodKey`, `HTTPResponseStatusCode`, `URLFull`, `HTTPRoute`
 - **DB**: `DBSystemKey`, `DBNamespace`, `DBOperationName`
-- **消息队列**: `MessagingSystem`, `MessagingDestinationName`, `MessagingOperationTypePublish`
+- **消息队列**: `MessagingSystem`, `MessagingDestinationName`
 
-> 完整示例见 [references/examples.md](references/examples.md#2-分布式追踪)
+> 完整追踪示例见 [references/examples.md](references/examples.md#2-分布式追踪)
 
 ---
 
-## 3. 指标收集
+## 5. 指标收集
 
 ### 指标类型
 
@@ -75,46 +196,76 @@ defer span.End()
 | UpDownCounter | `meter.Int64UpDownCounter()` | 可增减（活跃连接） |
 | ObservableGauge | `meter.Int64ObservableGauge()` | 异步当前值（缓存大小） |
 
-### 记录指标
-
-```go
-orderCounter.Add(ctx, 1, metric.WithAttributes(
-    attribute.String("order.type", order.Type),
-    attribute.String("status", statusFromError(err)),
-))
-orderDuration.Record(ctx, duration, metric.WithAttributes(...))
-```
-
-> 完整实现见 [references/examples.md](references/examples.md#3-指标收集)
+> 完整指标实现见 [references/examples.md](references/examples.md#3-指标收集)
 
 ---
 
-## 4. 日志关联
+## 6. 日志关联（xlog + EnrichHandler）
 
-### slog + OTel Bridge
+### xlog Builder 模式
 
 ```go
-handler := otelslog.NewHandler("my-service",
-    otelslog.WithLoggerProvider(global.GetLoggerProvider()),
-)
-logger := slog.New(handler)
-logger.InfoContext(ctx, "processing order", slog.String("order_id", orderID))
+logger, cleanup, err := xlog.New().
+    SetOutput(os.Stdout).
+    SetLevel(xlog.LevelInfo).
+    SetFormat("json").           // "text" 或 "json"
+    SetAddSource(true).          // 包含源码位置
+    SetEnrich(true).             // 自动注入 trace/identity 信息
+    Build()
+defer cleanup()
 ```
 
-### 手动注入 Trace 信息
+### EnrichHandler 自动注入
+
+当 `SetEnrich(true)` 时，日志自动从 context 注入：
 
 ```go
-spanCtx := trace.SpanContextFromContext(ctx)
-if spanCtx.IsValid() {
-    // 添加 trace_id, span_id 到日志
+// EnrichHandler 在每条日志中自动添加：
+// trace_id, span_id, request_id, trace_flags  (来自 xctx.AppendTraceAttrs)
+// platform_id, tenant_id, tenant_name         (来自 xctx.AppendIdentityAttrs)
+
+logger.Info(ctx, "processing order", slog.String("order_id", orderID))
+// 输出: {"msg":"processing order","order_id":"123","trace_id":"abc","tenant_id":"t1",...}
+```
+
+### EnrichHandler 实现原理
+
+```go
+func (h *EnrichHandler) Handle(ctx context.Context, r slog.Record) error {
+    var buf [6]slog.Attr  // 栈分配，零 GC 开销
+    attrs := buf[:0]
+    attrs = xctx.AppendTraceAttrs(attrs, ctx)     // 只追加非空字段
+    attrs = xctx.AppendIdentityAttrs(attrs, ctx)
+    if len(attrs) > 0 {
+        r = r.Clone()
+        r.AddAttrs(attrs...)
+    }
+    return h.base.Handle(ctx, r)
 }
 ```
 
-> 完整实现见 [references/examples.md](references/examples.md#4-日志关联)
+### Logger 接口
+
+```go
+type Logger interface {
+    Debug(ctx context.Context, msg string, attrs ...slog.Attr)
+    Info(ctx context.Context, msg string, attrs ...slog.Attr)
+    Warn(ctx context.Context, msg string, attrs ...slog.Attr)
+    Error(ctx context.Context, msg string, attrs ...slog.Attr)
+    Stack(ctx context.Context, msg string, attrs ...slog.Attr)  // 含完整堆栈
+    With(attrs ...slog.Attr) Logger
+    WithGroup(name string) Logger
+}
+
+type Leveler interface {
+    SetLevel(level Level)  // 运行时动态调整日志级别
+    GetLevel() Level
+}
+```
 
 ---
 
-## 5. 上下文传播
+## 7. 上下文传播
 
 ### 自动 Instrumentation
 
@@ -125,53 +276,79 @@ if spanCtx.IsValid() {
 | gRPC 客户端 | `otelgrpc.NewClientHandler()` | `grpc.WithStatsHandler()` |
 | gRPC 服务端 | `otelgrpc.NewServerHandler()` | `grpc.StatsHandler()` |
 
+### XKit Trace 传播（xtrace）
+
+```go
+// HTTP 中间件自动提取
+xtrace.HTTPMiddleware()  // 提取 X-Trace-ID, traceparent 等
+
+// gRPC 拦截器自动提取
+xtrace.GRPCUnaryServerInterceptor()  // 提取 metadata 中的 trace 信息
+
+// 支持 W3C Trace Context: 00-{trace-id}-{parent-id}-{trace-flags}
+```
+
 ### 手动传播
 
 ```go
-// 注入/提取 HTTP 请求
 otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(req.Header))
-
-// 注入/提取 Map
-otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(m))
-otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(m))
 ```
 
 ---
 
-## 6. 采样策略
+## 8. 采样策略（xsampling）
 
 ### 内置采样器
 
-- `trace.AlwaysSample()` — 全部采样
-- `trace.NeverSample()` — 不采样
-- `trace.TraceIDRatioBased(0.1)` — 10% 比例采样
-- `trace.ParentBased(...)` — 父级决定（推荐）
+```go
+// 基础
+xsampling.Always()                      // 全部采样
+xsampling.Never()                       // 不采样
+xsampling.NewRateSampler(0.1)          // 10% 比例采样
+xsampling.NewCountSampler(100)         // 每 100 个采样一个
+xsampling.NewProbabilitySampler(0.5)   // 50% 概率采样
+```
 
-### 自定义采样器
-
-实现 `trace.Sampler` 接口：`ShouldSample()` + `Description()`
-
-> 完整 ErrorSampler 示例见 [references/examples.md](references/examples.md#6-采样策略)
-
----
-
-## 7. 健康检查过滤
+### KeyBasedSampler（跨进程一致采样）
 
 ```go
-otelhttp.NewHandler(handler, "my-service",
-    otelhttp.WithFilter(func(r *http.Request) bool {
-        return r.URL.Path != "/health" && r.URL.Path != "/ready"
-    }),
+// 相同 trace_id 在所有服务中做出相同采样决策
+sampler := xsampling.NewKeyBasedSampler(0.1, func(ctx context.Context) string {
+    return xctx.TraceID(ctx)  // 使用 xxhash 确定性哈希
+})
+```
+
+### CompositeSampler（组合采样器）
+
+```go
+// AND：所有条件都满足
+sampler := xsampling.All(
+    xsampling.NewRateSampler(0.1),
+    xsampling.NewKeyBasedSampler(0.5, keyFunc),
 )
+
+// OR：任一条件满足
+sampler := xsampling.Any(
+    xsampling.NewRateSampler(0.01),
+    debugModeSampler,
+)
+```
+
+### OTel 内置采样器
+
+```go
+trace.AlwaysSample()
+trace.NeverSample()
+trace.TraceIDRatioBased(0.1)
+trace.ParentBased(trace.TraceIDRatioBased(0.1))  // 推荐
 ```
 
 ---
 
-## 8. Baggage 传递业务数据
+## 9. Baggage 传递业务数据
 
 ```go
-// 设置
 member, _ := baggage.NewMember("tenant_id", tenantID)
 bag, _ := baggage.New(member)
 ctx = baggage.ContextWithBaggage(ctx, bag)
@@ -183,28 +360,42 @@ tenantID := bag.Member("tenant_id").Value()
 
 ---
 
+## 10. 属性辅助函数
+
+```go
+// xmetrics 类型安全属性构造
+xmetrics.String(key, value string) Attr
+xmetrics.Int(key string, value int) Attr
+xmetrics.Int64(key string, value int64) Attr
+xmetrics.Float64(key string, value float64) Attr
+xmetrics.Bool(key string, value bool) Attr
+xmetrics.Duration(key string, value time.Duration) Attr
+xmetrics.Any(key string, value any) Attr
+```
+
+---
+
 ## 最佳实践
 
 ### 初始化
-- 在 main() 开头初始化 OTel
-- 使用 defer shutdown(ctx) 确保数据导出
-- 统一配置 Resource 属性
+- 在 main() 开头初始化 OTel SDK
+- 使用 `defer shutdown(ctx)` 确保数据导出
+- 统一配置 Resource 属性（service.name, environment）
 
-### 追踪
-- Span 名称使用 `<动词><名词>` 格式
-- 使用语义属性（semconv）
-- 只在必要时记录 span.RecordError()
-- 健康检查端点不追踪
+### Observer 模式
+- 业务代码使用 `xmetrics.Observer` 而非直接 OTel API
+- 测试时传入 `NoopObserver` 禁用观测开销
+- `nil` observer 安全 — 使用 `xmetrics.Start()` 辅助函数
 
-### 指标
-- 使用标准单位 (ms, s, {item})
+### 日志
+- 使用 `SetEnrich(true)` 自动关联 trace
+- 日志格式生产用 `json`，开发用 `text`
+- 运行时可通过 `Leveler.SetLevel()` 动态调级
+
+### 采样
+- 生产环境使用 `ParentBased` 采样器
+- 跨服务一致采样使用 `KeyBasedSampler`（xxhash 确定性）
 - 控制 cardinality（属性值数量）
-- 优先使用 Histogram 记录延迟
-
-### 上下文
-- 始终传递 context.Context
-- 使用自动 instrumentation 库
-- Baggage 只传递小量元数据
 
 ---
 
@@ -212,15 +403,15 @@ tenantID := bag.Member("tenant_id").Value()
 
 - [ ] 配置 Resource（service.name, environment）？
 - [ ] 设置合适的采样率？
-- [ ] 使用 ParentBased 采样器？
 - [ ] HTTP/gRPC 使用自动 instrumentation？
-- [ ] 日志关联 Trace ID？
+- [ ] 日志关联 Trace ID（EnrichHandler）？
 - [ ] 健康检查端点排除追踪？
 - [ ] 指标属性 cardinality 可控？
 - [ ] 优雅关闭 OTel Provider？
+- [ ] 业务代码使用 Observer 抽象？
 
 ---
 
 ## 参考资料
 
-- [完整代码示例](references/examples.md) — SDK 初始化、追踪、指标、日志、传播、采样完整实现
+- [完整代码示例](references/examples.md) — SDK 初始化、Observer、追踪、指标、日志、传播、采样完整实现
