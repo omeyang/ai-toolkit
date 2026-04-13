@@ -11,8 +11,12 @@ workflows/
 │   └── WORKFLOW.md
 ├── code-review/         # 代码审查工作流
 │   └── WORKFLOW.md
-└── deploy/              # Kubernetes 部署工作流
-    └── WORKFLOW.md
+├── deploy/              # Kubernetes 部署工作流
+│   └── WORKFLOW.md
+└── reqloop/             # 需求自验收闭环工作流
+    ├── WORKFLOW.md
+    ├── stages/          # 7 阶段详细指令
+    └── templates/       # 反讲文档 / 验收报告模板
 ```
 
 ## 工作流清单
@@ -22,6 +26,7 @@ workflows/
 | `tdd` | 测试驱动开发 | go-test Skill + golang-pro Agent + 格式化 Hook |
 | `code-review` | 结构化代码审查 | code-reviewer Agent + security-auditor Agent |
 | `deploy` | K8s 部署上线 | k8s-devops Agent + k8s-go Skill + MCP |
+| `reqloop` | 需求自验收闭环（反讲 + 验收）| qianliu-ipd/or/gitlab/ci/aitest/td + code-review-graph + orbitest |
 
 ## 设计原则
 

@@ -1,0 +1,46 @@
+{
+  "name": "reqloop",
+  "version": "0.2.0",
+  "description": "需求自验收闭环工作流 — EARS 反讲 + 判定三元组 + 决策链 + 负向影响分析",
+  "kind": "workflow",
+  "entry": {
+    "skill": "SKILL.md",
+    "command": "command.md"
+  },
+  "assets": [
+    "WORKFLOW.md",
+    "LITE.md",
+    "stages/",
+    "templates/"
+  ],
+  "features": {
+    "ears_schema": true,
+    "verdict_triad": true,
+    "decision_trace": true,
+    "impact_radius": true,
+    "security_exception": true,
+    "oslc_export": true,
+    "lite_mode": true
+  },
+  "supported_targets": [
+    "claude-code",
+    "codex",
+    "costrict",
+    "costrict-cli"
+  ],
+  "changelog": {
+    "0.2.0": [
+      "EARS 语法 + YAML 结构化 backspec schema",
+      "review 强制 verdict+confidence+evidence 三元组",
+      "新增 decisions.jsonl 决策链 (append-only + inputs_hash)",
+      "新增阶段 4.5 impact-radius 负向影响分析",
+      "安全冲突例外裁决规则",
+      "新增阶段 8 export（OSLC/ReqIF/CSV/Xray）",
+      "新增轻量模式 --lite（无企业 ALM 依赖）",
+      "子命令对齐 Spec Kit 心智"
+    ],
+    "0.1.0": [
+      "初始 7 阶段流水线"
+    ]
+  }
+}
