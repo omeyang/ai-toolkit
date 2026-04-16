@@ -25,24 +25,15 @@
 
 ## 强约束（违反即中止）
 
-1. **阶段 3 未 confirm 严禁进入阶段 4**
-   - 读取 `.reqloop/confirmed-{id}.md`
-   - 校验 `confirmed: true` 且 `confirmed_by` 非空
-   - 校验反讲文档所有 🔴🟡🟠 差异均有处置决定
-   - 任一不满足 → 明确告知用户"已中止，等待人工 confirm"，**不继续**
+完整约束定义见 `WORKFLOW.md` §核心设计取舍，以下为执行摘要（共 7 条）：
 
-2. **三源冲突不得调和**
-   - 代码 ↔ 需求单 ↔ PRD 有差异时，默认以代码为准
-   - 在反讲文档中标红列出，**不自行判断哪方正确**
-   - 裁决权完全交给开发人工
-
-3. **阶段 5 不下"符合业务"结论**
-   - 只输出业务边界覆盖矩阵（场景 × 代码 × 测试 × 数据 × 环境）
-   - 有 ❌ 或 ❓ 即标"未闭环"，不擅自放行
-
-4. **不跨范围 review**
-   - 阶段 4 的 review 仅限反讲已 confirm 的变更
-   - 超范围建议归入 `out-of-scope` 段，不计入验收结论
+1. **阶段 3 硬门禁** — 未 confirm 严禁进入阶段 4a（校验 confirmed + schema + 差异处置）
+2. **三源冲突不得调和** — 默认代码为准；命中安全关键词走**安全例外**（PRD 为准 + security-auditor）
+3. **判定三元组强制** — 所有 AI 判定输出 `verdict + confidence + evidence`，`confidence: low` 不独立结论
+4. **决策链 append-only** — 每条判定写 `.reqloop/decisions-{id}.jsonl`，含 `inputs_hash`，不得改写
+5. **阶段 4b 隐式行为变更阻塞** — 未关联 REQ-ID 的反向调用链变更须人工确认
+6. **阶段 5 不下"符合业务"结论** — 只出覆盖矩阵，❌/❓ 即标未闭环
+7. **不跨范围 review** — 超出反讲范围的入 `out-of-scope`，不影响验收结论
 
 ## 产物约定
 
@@ -54,9 +45,16 @@
 当用户再次执行 `/reqloop <需求ID>`：
 
 1. 扫描 `.reqloop/` 下已存在的产物文件
-2. 从最后一个完成的阶段的**下一阶段**开始
-3. 若停在阶段 3 门禁，检查 confirm 状态决定放行或继续等待
-4. 用户可显式指定从某阶段重跑：`/reqloop <需求ID> --from 4`
+2. 检查每个产物的 frontmatter `stage_status` 字段判断完成度：
+   - `stage_status: complete` → 该阶段已完成，跳过
+   - `stage_status: in_progress` → 该阶段未完成（AI 被中断），**从此阶段重跑**
+   - `stage_status` 缺失或文件不存在 → 该阶段未开始
+3. 从第一个非 `complete` 的阶段开始执行
+4. 若停在阶段 3 门禁，检查 confirm 状态决定放行或继续等待
+5. 用户可显式指定从某阶段重跑：`/reqloop <需求ID> --from 4`（忽略 stage_status）
+6. 续跑时 decisions.jsonl 通过 `idempotency_key` 去重，不产生重复行
+
+**每个阶段写入产物时**：开始时写 `stage_status: in_progress`，全部完成后更新为 `stage_status: complete`。
 
 ## 交付总结格式（最终给用户）
 

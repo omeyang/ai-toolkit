@@ -13,15 +13,12 @@
 原因：需求单和 PRD 可能过期，代码是真实发生的事实。
 
 **安全例外（硬性覆盖默认规则）**：
-若需求单 / PRD 的冲突条目命中以下关键词，**不走"代码为准"**，改为以 PRD 为准并阻塞验收，同时调起 `security-auditor` Agent 生成 `.reqloop/security-{id}.md`：
+若需求单 / PRD 的冲突条目命中安全关键词，**不走"代码为准"**，改为以 PRD 为准并阻塞验收，同时调起 `security-auditor` Agent 生成 `.reqloop/security-{id}.md`。
 
-- 鉴权 / auth / authz / authn / 权限 / permission / RBAC / ACL
-- 审计 / audit / 日志合规
-- 限流 / rate limit / throttle / 熔断
-- PII / 敏感信息 / 脱敏 / mask
-- 加密 / encrypt / TLS / 签名 / signature
-- 幂等 / idempoten
-- SQL 注入 / XSS / CSRF / 越权
+关键词来源：`templates/security-keywords.yaml`（团队可按需扩展，无需修改本文件）。
+匹配方式：大小写不敏感，子串匹配。
+
+**兜底规则**：即使未命中关键词列表，当 AI 判定 `dimension: security` 且 `confidence: high` 时，也触发安全例外流程。
 
 命中时：
 1. 反讲文档 frontmatter `security_sensitive: true`
@@ -87,21 +84,25 @@
    - 明确告知用户：**已中止，等待人工 confirm**
    - 不继续阶段 4
 
-## 恢复进入阶段 4 的判定（机器校验）
+## 恢复进入阶段 4a 的判定（机器校验）
 
 AI 再次被调起时执行以下校验，**任一不满足立即中止**：
 
 1. `.reqloop/confirmed-{id}.md` 中 `confirmed: true` 且 `confirmed_by` 非空
-2. 反讲文档 §1 结构化 YAML 通过 schema 校验：
+2. 反讲文档 §1 结构化 YAML 通过 `templates/backspec-schema.json` 校验（JSON Schema Draft 2020-12）：
    - 每条 `requirements[].status` ∈ {covered, partial, missing, conflict, extra}
    - `status: covered` 必须有 ≥1 `code_anchors`
    - `confidence: low` 必须有 `confidence_reason`
+   - `source.hash` 必须匹配 `^sha256:[a-f0-9]{8,64}$`
 3. 所有阶段 2 采集到的 diff hunks 至少被一条 requirement 的 `code_anchors` 引用
    （未引用 hunks 必须以 `status: extra` 列入 §3 🟡，由人工处置）
 4. 反讲文档 §3 所有 🔴🟡🟠 差异均有处置决定
 5. 若 `security_sensitive: true`，§5 裁决表非空，且 security-auditor 报告存在
 
-校验失败 → 输出具体违规条目，不放行。
+校验失败 → 输出具体违规条目（含 schema 路径和实际值），不放行。
+
+**校验工具**：优先用 `ajv-cli`（`ajv validate -s templates/backspec-schema.json -d backspec-{id}.yaml`），
+不可用时 AI 逐条检查 schema 约束并列出通过/失败条目。
 
 ## 失败处理
 

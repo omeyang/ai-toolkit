@@ -4,6 +4,8 @@ generated_at: {ISO8601}
 schema_version: 2
 conclusion: pass | conditional | fail
 incomplete: false
+resolved_by:                    # 有条件通过升级为通过时填写
+resolved_at:
 security_sensitive: false
 stages:
   gather: ok | missing
@@ -16,7 +18,8 @@ stages:
 counts:
   critical: 0
   high: 0
-  low_confidence: 0       # 需人工裁决的决策数
+  low_confidence: 0             # 需人工裁决的决策数
+  implicit_behavior_changes: 0  # 阶段 4b 隐式行为变更数
   coverage_gaps: 0
 artifacts:
   decisions: .reqloop/decisions-{id}.jsonl
@@ -25,7 +28,7 @@ artifacts:
 
 # 验收报告 — {需求 ID}
 
-## 一、结论
+## 结论
 
 **{通过 / 有条件通过 / 不通过}**
 
@@ -33,8 +36,10 @@ artifacts:
 - 运行时失败数：N
 - e2e 失败数：N
 - 覆盖矩阵未闭环项：N
+- 隐式行为变更未签字：N
+- 低置信度待裁决：N
 
-## 二、反讲文档确认摘要
+## 反讲文档确认摘要
 
 - 反讲文档：`.reqloop/backspec-{id}.md`
 - confirm 人：
@@ -43,7 +48,7 @@ artifacts:
 - 🟡 额外已处置：N 项
 - 🟠 偏差已处置：N 项
 
-## 三、代码审查摘要
+## 代码审查摘要
 
 产物：`.reqloop/review-{id}.md`
 
@@ -58,7 +63,7 @@ artifacts:
 2. ...
 3. ...
 
-## 三点五、负向影响分析摘要
+## 负向影响分析摘要
 
 产物：`.reqloop/impact-{id}.md`
 
@@ -70,7 +75,7 @@ artifacts:
 
 > 隐式行为变更 > 0 时，本次验收最高只能判"有条件通过"。
 
-## 四、运行时校验摘要
+## 运行时校验摘要
 
 产物：`.reqloop/runtime-{id}.md`
 
@@ -80,7 +85,7 @@ artifacts:
   - 场景 X：缺 ...
   - 场景 Y：缺 ...
 
-## 五、端到端回归摘要
+## 端到端回归摘要
 
 产物：`.reqloop/e2e-{id}.md`
 
@@ -90,20 +95,20 @@ artifacts:
   - 用例 A → 场景 X
   - ...
 
-## 六、失败项对应缺陷
+## 失败项对应缺陷
 
 | 缺陷 ID | 标题 | 来源阶段 |
 |---------|------|---------|
 | TD-xxx | [reqloop/{id}] ... | review / runtime / e2e |
 
-## 七、后续动作建议
+## 后续动作建议
 
 - [ ] 修复 Critical 问题
 - [ ] 补齐覆盖矩阵缺口
 - [ ] 失败用例定位与修复
 - [ ] 修复后重跑 `/reqloop {id}`
 
-## 七点五、决策链摘要
+## 决策链摘要
 
 来源：`.reqloop/decisions-{id}.jsonl`
 
@@ -116,15 +121,16 @@ artifacts:
 | e2e | N | N | N | N | N |
 
 > `low` 列非零时，本次验收最高只能判"有条件通过"。
-> `human_override` 列记录的是人工修正 AI 判定的次数，用于迭代改进提示词与规则。
+> `human_override` 列记录的是人工修正 AI 判定的次数。
+> 使用 `/reqloop stats` 跨需求聚合此数据，持续改进提示词与规则。
 
-## 八、安全例外（仅当 security_sensitive: true）
+## 安全例外（仅当 security_sensitive: true）
 
 - 触发关键词：{...}
 - security-auditor 报告：`.reqloop/security-{id}.md`
 - 未修复的安全冲突数：N（>0 则强制 `conclusion: fail`）
 
-## 九、产物索引
+## 产物索引
 
 - 需求原文：`.reqloop/req-{id}.md`
 - 代码归档：`.reqloop/code-{id}/`

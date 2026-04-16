@@ -1,7 +1,7 @@
 ---
 name: reqloop-lite
 description: 轻量版需求自验收 — 反向 spec-driven 验收（code → spec 裁决），不依赖企业 ALM / CI / 内部工具。仅需 git + 语言 test runner。保留核心能力：EARS 结构化反讲 + 人工 confirm 硬门禁 + 判定三元组 + 决策链 + 负向影响分析 + 安全例外。适合开源项目、单仓库团队、外部协作场景。触发：用户提供 PR 描述 / issue 正文希望做需求验收，或 `/reqloop-lite <id>`。
-version: 0.2.0
+version: 0.2.1
 ---
 
 # reqloop-lite — 轻量需求自验收
@@ -34,6 +34,7 @@ reqloop 完整版需要 qianliu-ipd / qianliu-gitlab / qianliu-ci / qianliu-aite
 | e2e 回归 | 跳过或人工贴结果 |
 | 缺陷回写 | `gh issue create` 或本地 Markdown 清单 |
 | 依赖图 | `go list -deps` / tree-sitter（深度 ≤2）|
+| Monorepo 跨模块 | 完全支持（Go workspace / Nx / 目录级拆分）|
 | 跨仓库影响 | 标记 `unknown`，提示升级到完整版 |
 
 ## 依赖
@@ -48,7 +49,8 @@ reqloop 完整版需要 qianliu-ipd / qianliu-gitlab / qianliu-ci / qianliu-aite
 /reqloop-lite <id-or-PR>
 ```
 
-首次调用交互获取：需求文本、代码范围、验证命令、e2e 策略。详见主文档 `../reqloop/LITE.md`。
+默认 zero-config：自动从 PR body / commit message 推断需求描述，从 Makefile / go.mod / package.json 推断验证命令。
+推断结果展示确认后直接执行。用 `--interactive` 强制逐项交互。详见 `../reqloop/LITE.md`。
 
 ## 与完整版的关系
 

@@ -21,10 +21,36 @@
 
 ## Lite 版输入契约
 
-用户首次调用时交互获取：
+### Zero-config 智能推断（首选）
+
+Lite 模式优先自动推断所有输入，**仅在推断失败时才交互询问**：
+
+| 输入项 | 推断策略 | 推断失败时 |
+|--------|---------|-----------|
+| 需求描述 | ① `gh pr view --json body` 提取当前 PR body ② 最近 N 条 commit message 拼接 ③ 检查 `.github/ISSUE_TEMPLATE` | 询问用户粘贴 |
+| 代码范围 | ① 检测当前分支是否有 upstream → `git diff main..HEAD` ② 检测 `gh pr view` → PR diff | 询问用户选择 |
+| 验证命令 | ① `Makefile` 含 `test` target → `make test` ② `go.mod` 存在 → `go test ./... && go vet ./...` ③ `package.json` 含 `test` script → `npm test` ④ `Cargo.toml` → `cargo test` | 询问用户输入 |
+| e2e 测试 | 默认跳过（结论最高"有条件通过"）| — |
+
+**推断结果须在执行前展示给用户确认**（一次性确认，不逐条问）：
 
 ```
-/reqloop <id> --lite
+/reqloop PR-42 --lite
+
+AI: Lite 模式 — 自动推断的输入如下，回车确认或修改：
+  需求描述: [PR #42 body 摘要前 3 行...]
+  代码范围: git diff main..HEAD (12 files changed)
+  验证命令: go test ./... && go vet ./... && golangci-lint run
+  e2e: 跳过
+  > 确认 (Y/n) 或输入修改项编号:
+```
+
+### 手动模式（完整交互）
+
+用户可通过 `--interactive` 强制逐项交互：
+
+```
+/reqloop <id> --lite --interactive
 
 AI: Lite 模式，请提供：
   1. 需求描述（直接粘贴 PR 描述 / issue 正文 / PRD 路径）：
@@ -46,7 +72,12 @@ AI: Lite 模式，请提供：
 
 - `.reqloop/req-{id}.md` 由用户提供的文本 + git log 组合生成
 - `.reqloop/code-{id}/` 由 `git diff --name-only base..HEAD` 填充
-- 跨仓库？Lite 不支持，提示升级到完整版
+- **跨模块 vs 跨仓库**（重要区分）：
+  - **Monorepo / Go workspace / Nx workspace**：单仓多模块，Lite **完全支持**
+    - Go workspace：`go list -m` 枚举模块 → 按模块归档 diff → 模块间 impact analysis 正常执行
+    - Nx/Turborepo：`nx affected` 或 `turbo run --filter` 确定受影响模块
+    - 通用 monorepo：按目录前缀拆分 diff，每个顶级目录视为一个逻辑模块
+  - **真正的跨仓库**（不同 git remote）：Lite 不支持，提示升级到完整版
 
 ### 阶段 3 反讲（不变）
 
@@ -59,10 +90,11 @@ EARS schema + 硬门禁 + 安全例外全部保留。
 - 跨语言项目降级为"仅分析同语言边界"，标注 `partial_graph: true`
 - 判定三元组、决策链照常产出
 
-### 阶段 4.5 影响分析（降级）
+### 阶段 4b 影响分析（降级）
 
 - 深度限制降为 2（完整版是 3）
-- 跨仓库影响标记为 `unknown`，提示人工
+- **Monorepo 模块间影响**：正常分析（Go workspace 用 `go list -deps`，其他用目录级 import 分析）
+- **跨仓库影响**（不同 git remote）：标记为 `unknown`，提示人工
 
 ### 阶段 5 runtime（本地执行）
 

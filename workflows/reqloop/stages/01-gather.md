@@ -35,6 +35,7 @@
 ```markdown
 ---
 id: {id}
+stage_status: complete | in_progress
 source: ipd | or
 fetched_at: {ISO8601}
 has_prd: true | false

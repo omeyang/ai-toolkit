@@ -1,6 +1,6 @@
 ---
 description: 轻量需求自验收 — 无需企业 ALM / CI，仅需 git + test runner
-argument-hint: <id或PR号> [--prd <路径>] [--base <ref>] [--test-cmd <命令>]
+argument-hint: <id或PR号> [--prd <路径>] [--base <ref>] [--test-cmd <命令>] [--interactive]
 ---
 
 执行 reqloop-lite 轻量需求自验收工作流。等价于 `/reqloop <id> --lite`。
@@ -10,7 +10,8 @@ argument-hint: <id或PR号> [--prd <路径>] [--base <ref>] [--test-cmd <命令>
 - `<id或PR号>`：任意唯一标识（`PR-42` / `issue-123` / 自定义）
 - `--prd <路径>`：本地 PRD 文件
 - `--base <ref>`：diff 基线（默认 `main`）
-- `--test-cmd <命令>`：自定义验证命令（默认 `go test ./...`）
+- `--test-cmd <命令>`：自定义验证命令（默认从 Makefile/go.mod/package.json 推断）
+- `--interactive`：跳过 zero-config 推断，逐项交互获取输入
 
 ## 子命令
 

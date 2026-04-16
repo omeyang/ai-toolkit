@@ -1,6 +1,6 @@
 {
   "name": "reqloop-lite",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "轻量反向需求验收 — 无企业 ALM 依赖，仅需 git + test runner。核心能力（EARS 反讲、决策链、影响分析、安全例外）与完整版一致。",
   "kind": "workflow",
   "entry": {

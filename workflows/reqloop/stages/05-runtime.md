@@ -49,6 +49,7 @@
 ```markdown
 ---
 id: {id}
+stage_status: complete | in_progress
 env: {用户指定环境}
 ci_pipeline: {流水线链接}
 ---

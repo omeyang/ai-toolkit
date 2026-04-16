@@ -1,4 +1,4 @@
-# 阶段 4.5 — 负向影响分析 (impact-radius)
+# 阶段 4b — 负向影响分析 (impact-radius)
 
 ## 动机
 
@@ -52,7 +52,7 @@
 
 5. **写入决策链**
    - 每条判定 append 一行到 `.reqloop/decisions-{id}.jsonl`
-   - `stage: "impact-radius"`，字段与决策链契约一致
+   - `stage: "impact-radius"`（阶段 4b），字段与决策链契约一致
 
 ## 产物
 
@@ -61,6 +61,7 @@
 ```markdown
 ---
 id: {id}
+stage_status: complete | in_progress
 schema_version: 1
 based_on_confirmed: true
 counts:

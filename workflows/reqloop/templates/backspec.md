@@ -1,5 +1,6 @@
 ---
 id: {需求 ID}
+stage_status: complete | in_progress
 generated_at: {ISO8601}
 schema_version: 2
 sources:
